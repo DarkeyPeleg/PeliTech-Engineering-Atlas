@@ -1,0 +1,5 @@
+{
+  "label": "Infrastructure",
+  "description": "The compute, network and storage underneath.",
+  "order": 5
+}

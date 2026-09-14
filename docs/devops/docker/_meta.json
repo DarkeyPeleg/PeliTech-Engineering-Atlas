@@ -1,0 +1,5 @@
+{
+  "label": "Docker",
+  "description": "Packaging applications so they run the same everywhere.",
+  "order": 1
+}

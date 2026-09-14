@@ -1,0 +1,200 @@
+/*
+ * Design tokens — the single styling source for the application.
+ *
+ * Section 1: brand tokens from design.md, verbatim.
+ * Section 2: semantic aliases that reference them.
+ *
+ * Components use ONLY the semantic aliases (`bg-surface-soft`, `text-ink-muted`,
+ * `text-accent`, ...). A rebrand, or adding a dark scheme later, is a change to
+ * this file alone. Raw hex values and brand-token utilities inside
+ * src/components are a CI failure — see scripts/validate-content.ts.
+ */
+
+@theme {
+  /* =========================================================================
+   * 0. Clear Tailwind's defaults
+   *
+   * design.md is a closed system: one action color, one type scale, one spacing
+   * scale, six radii. Removing the built-in palette and scales makes that
+   * enforceable by the compiler instead of by review — `text-red-500`,
+   * `rounded-md` and `p-6` simply do not exist, so drift fails the build.
+   *
+   * Consequence worth knowing: spacing utilities are px-valued per design.md,
+   * so `p-4` is 4px and `p-24` is 24px, not Tailwind's default rem multiples.
+   * ====================================================================== */
+
+  --color-*: initial;
+  --spacing-*: initial;
+  --text-*: initial;
+  --font-*: initial;
+  --radius-*: initial;
+  --shadow-*: initial;
+  --leading-*: initial;
+  --tracking-*: initial;
+
+  /* =========================================================================
+   * 1. Brand tokens (design.md)
+   * ====================================================================== */
+
+  --brand-atlassian-blue: #1868db;
+  --brand-midnight-navy: #101214;
+  --brand-carbon-edge: #292a2e;
+  --brand-slate-current: #1c2b42;
+  --brand-muted-indigo: #42526e;
+  --brand-pure-white: #ffffff;
+  --brand-fog-white: #f0f1f2;
+  --brand-ash-gray: #b7b9be;
+  --brand-taxicab-yellow: #fca700;
+  --brand-lavender-wash: #eed7fc;
+  --brand-tinted-blue: #e9f2fe;
+
+  /* Decorative confetti palette — editorial framing and diagrams only. */
+  --brand-confetti-violet: #bf63f3;
+  --brand-confetti-yellow: #fca700;
+  --brand-confetti-blue: #4d8ced;
+  --brand-confetti-green: #22a06b;
+
+  /* =========================================================================
+   * 2. Semantic aliases
+   * ====================================================================== */
+
+  /* Surfaces (design.md levels 0-4) */
+  --color-surface: var(--brand-pure-white);
+  --color-surface-soft: var(--brand-fog-white);
+  --color-surface-tinted: var(--brand-tinted-blue);
+  --color-surface-band: var(--brand-lavender-wash);
+  --color-surface-inverted: var(--brand-midnight-navy);
+
+  /* Ink */
+  --color-ink: var(--brand-midnight-navy);
+  --color-ink-body: var(--brand-carbon-edge);
+  --color-ink-muted: var(--brand-muted-indigo);
+  --color-ink-subtle: var(--brand-slate-current);
+  --color-ink-inverted: var(--brand-pure-white);
+
+  /* Action — one chromatic action color, per design.md */
+  --color-accent: var(--brand-atlassian-blue);
+  --color-accent-ink: var(--brand-pure-white);
+  --color-accent-soft: var(--brand-tinted-blue);
+  /* The yellow CTA exists only on dark panels. */
+  --color-accent-on-dark: var(--brand-taxicab-yellow);
+
+  /* Lines */
+  --color-border-subtle: var(--brand-fog-white);
+  --color-border-strong: var(--brand-carbon-edge);
+  --color-border-disabled: var(--brand-ash-gray);
+
+  /* Decor aliases (editorial + diagrams) */
+  --color-decor-violet: var(--brand-confetti-violet);
+  --color-decor-yellow: var(--brand-confetti-yellow);
+  --color-decor-blue: var(--brand-confetti-blue);
+  --color-decor-green: var(--brand-confetti-green);
+
+  /* =========================================================================
+   * Typography
+   * ====================================================================== */
+
+  --font-charlie-display:
+    var(--font-manrope), ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    Roboto, sans-serif;
+  --font-charlie-text:
+    var(--font-inter), ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    Roboto, sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+
+  --text-caption: 13px;
+  --text-caption--line-height: 1.29;
+  --text-ui: 14px;
+  --text-ui--line-height: 1.25;
+  --text-body: 16px;
+  --text-body--line-height: 1.5;
+  --text-subheading: 20px;
+  --text-subheading--line-height: 1.4;
+  --text-heading-sm: 24px;
+  --text-heading-sm--line-height: 1.25;
+  --text-heading: 32px;
+  --text-heading--line-height: 1.2;
+  --text-heading-lg: 48px;
+  --text-heading-lg--line-height: 1.14;
+  --text-display: 80px;
+  --text-display--line-height: 1;
+
+  /*
+   * design.md gives no mobile guidance for the large editorial sizes, so they
+   * ramp between steps that already exist in the scale rather than introducing
+   * new ones.
+   */
+  --text-heading-fluid: clamp(28px, 4.5vw, 48px);
+  --text-heading-fluid--line-height: 1.14;
+  --text-display-fluid: clamp(40px, 7vw, 80px);
+  --text-display-fluid--line-height: 1.05;
+
+  --tracking-display: 0.012em;
+  --tracking-display-sm: 0.03em;
+
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-bold: 700;
+  --font-weight-extrabold: 800;
+
+  /* =========================================================================
+   * Spacing (4px base unit)
+   * ====================================================================== */
+
+  --spacing-4: 4px;
+  --spacing-8: 8px;
+  --spacing-12: 12px;
+  --spacing-16: 16px;
+  --spacing-20: 20px;
+  --spacing-24: 24px;
+  --spacing-32: 32px;
+  --spacing-36: 36px;
+  --spacing-40: 40px;
+  --spacing-48: 48px;
+  --spacing-60: 60px;
+  --spacing-64: 64px;
+  --spacing-68: 68px;
+  --spacing-80: 80px;
+  --spacing-100: 100px;
+  --spacing-200: 200px;
+
+  /* =========================================================================
+   * Radii (design.md named elements)
+   * ====================================================================== */
+
+  --radius-nav: 2px;
+  --radius-images: 5px;
+  --radius-inputs: 8px;
+  --radius-cards: 20px;
+  --radius-buttons: 28px;
+  --radius-full: 10000px;
+
+  /* =========================================================================
+   * Elevation — navy-tinted only, never neutral black
+   * ====================================================================== */
+
+  --shadow-subtle: rgba(9, 30, 66, 0.31) 0px 0px 1px 0px, rgba(9, 30, 66, 0.25) 0px 1px 1px 0px;
+
+  /* =========================================================================
+   * Layout
+   * ====================================================================== */
+
+  --container-page: 1200px;
+  --container-prose: 768px;
+}
+
+:root {
+  /*
+   * The confetti frame gradient. Kept outside @theme because it is a decorative
+   * one-off rather than a utility-generating token, and design.md forbids
+   * tiling or reusing it as a pattern.
+   */
+  --gradient-confetti: conic-gradient(
+    var(--brand-confetti-violet) 170deg,
+    var(--brand-confetti-yellow) 171deg,
+    var(--brand-confetti-yellow) 230deg,
+    var(--brand-confetti-blue) 231deg,
+    var(--brand-confetti-blue) 360deg
+  );
+}

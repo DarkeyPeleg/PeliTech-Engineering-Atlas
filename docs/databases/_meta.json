@@ -1,0 +1,5 @@
+{
+  "label": "Databases",
+  "description": "Relational and non-relational data: modelling, indexing, transactions, replication and the trade-offs between them.",
+  "order": 3
+}

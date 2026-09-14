@@ -1,0 +1,364 @@
+---
+title: 'Webhooks'
+description: 'How webhooks invert the request model, and what receiving them safely requires — signature verification, idempotency, fast acknowledgement and reconciliation.'
+category: 'Integrations'
+tags:
+  - webhooks
+  - integrations
+  - api-design
+  - idempotency
+difficulty: 'Intermediate'
+lastUpdated: '2026-09-14'
+relatedTopics:
+  - backend/api-design/rest-api-design
+  - case-studies/payment-system/designing-a-payment-system
+---
+
+A webhook is an HTTP request a provider sends *to you* when something happens in their system. It
+inverts the usual arrangement: instead of your server calling an API and waiting for an answer, the
+provider calls your server and expects one.
+
+That inversion is the whole point, and also the source of every complication. You are now operating an
+endpoint that is called by a system you do not control, at times you do not choose, with a payload you
+must not trust, possibly more than once, possibly out of order, possibly hours late.
+
+## The problem it solves
+
+Suppose a payment provider processes a charge asynchronously — the customer authorises it, their bank
+takes a few seconds to a few days, and eventually the payment settles or fails. Your system needs to
+know which.
+
+Without webhooks, the only option is **polling**: ask the provider periodically whether anything has
+changed.
+
+```mermaid caption="Polling wastes almost every request and still adds latency; a webhook arrives once, when there is something to say."
+sequenceDiagram
+    participant App as Your server
+    participant Provider
+
+    Note over App,Provider: Polling
+    App->>Provider: GET /payments/p_1 (status?)
+    Provider-->>App: pending
+    App->>Provider: GET /payments/p_1 (status?)
+    Provider-->>App: pending
+    App->>Provider: GET /payments/p_1 (status?)
+    Provider-->>App: succeeded
+    Note over App,Provider: Webhook
+    Provider->>App: POST /webhooks/provider (payment.succeeded)
+    App-->>Provider: 200 OK
+```
+
+Polling is wasteful in proportion to how rarely things change and how quickly you need to know.
+Checking a thousand pending payments every ten seconds is 8.6 million requests a day, almost all of
+which report no change — and you still learn about the change up to ten seconds late. Tightening the
+interval multiplies the cost; loosening it increases the delay.
+
+A webhook reverses the economics: exactly one request per actual event, delivered within seconds. The
+price is that you must now run a public, unauthenticated-by-default HTTP endpoint correctly.
+
+## What makes receiving one hard
+
+Four properties of webhook delivery drive every design decision that follows.
+
+**The sender is unverified.** Your endpoint is a public URL. Anyone who discovers it can post JSON
+claiming a payment succeeded. Nothing about an inbound HTTP request proves who sent it.
+
+**Delivery is at-least-once.** Providers retry when they do not receive a success response — and a
+response can be lost after your server has already done the work. You will receive duplicates, and
+"we processed it but the ACK was lost" is indistinguishable from "we never processed it" from the
+provider's side.
+
+**Order is not guaranteed.** Retries and parallel delivery mean `payment.succeeded` can arrive before
+`payment.created`, and a `subscription.updated` from 10:00:01 can arrive after the one from 10:00:05.
+
+**Delivery is not guaranteed at all.** Your endpoint may be down through every retry attempt. A
+provider that gives up after several hours leaves you permanently unaware of an event unless you have
+another way to find out.
+
+## Receiving webhooks correctly
+
+### Verify the signature first
+
+Providers sign each request, typically with an HMAC over the raw request body using a shared secret.
+Verification must happen before the payload is parsed or trusted for anything.
+
+```typescript title="verify-signature.ts"
+import { createHmac, timingSafeEqual } from 'node:crypto';
+
+const TOLERANCE_SECONDS = 300;
+
+/**
+ * Verifies an HMAC-SHA256 signature over `timestamp.body`.
+ *
+ * Two details are load-bearing:
+ *   - the RAW body is signed, so re-serialising parsed JSON will not match
+ *   - the timestamp is inside the signed payload, which is what makes replay
+ *     rejection meaningful rather than spoofable
+ */
+export function verifySignature(
+  rawBody: string,
+  signatureHeader: string,
+  timestampHeader: string,
+  secret: string,
+): boolean {
+  const timestamp = Number.parseInt(timestampHeader, 10);
+  if (!Number.isFinite(timestamp)) return false;
+
+  const ageSeconds = Math.abs(Date.now() / 1000 - timestamp);
+  if (ageSeconds > TOLERANCE_SECONDS) return false;
+
+  const expected = createHmac('sha256', secret).update(`${timestamp}.${rawBody}`).digest();
+  let received: Buffer;
+  try {
+    received = Buffer.from(signatureHeader, 'hex');
+  } catch {
+    return false;
+  }
+
+  // Length must match before timingSafeEqual, which throws on a mismatch.
+  if (expected.length !== received.length) return false;
+
+  // Constant-time: a byte-by-byte comparison leaks the correct prefix through timing.
+  return timingSafeEqual(expected, received);
+}
+```
+
+<SecurityNote>
+Three ways this goes wrong in real codebases. Comparing signatures with `===`, which leaks the
+correct value through timing and allows it to be recovered byte by byte. Signing the *parsed* body,
+which fails intermittently because key order and whitespace are not preserved — so you must capture
+the raw body before any JSON middleware consumes it. And skipping the timestamp check, which leaves
+a validly signed request replayable forever by anyone who captured it once.
+</SecurityNote>
+
+### Acknowledge fast, process later
+
+Providers impose a short timeout — commonly a few seconds — and treat a slow response as a failure,
+which triggers a retry. If your handler does the real work inline, a slow database or a third-party
+call makes you time out, the provider retries, and you now process the same event twice
+*concurrently*.
+
+The correct shape is to persist the event and return immediately:
+
+```typescript title="webhook-route.ts"
+export async function POST(request: Request): Promise<Response> {
+  const rawBody = await request.text();
+
+  const signature = request.headers.get('x-provider-signature');
+  const timestamp = request.headers.get('x-provider-timestamp');
+  if (!signature || !timestamp) {
+    return new Response('Missing signature headers', { status: 400 });
+  }
+
+  if (!verifySignature(rawBody, signature, timestamp, env.PROVIDER_WEBHOOK_SECRET)) {
+    // 401 tells the provider not to bother retrying — the request was not from them.
+    return new Response('Invalid signature', { status: 401 });
+  }
+
+  const event = JSON.parse(rawBody) as ProviderEvent;
+
+  /*
+   * A unique constraint on the provider's event id is the idempotency guarantee.
+   * Enforcing it in the database rather than with a prior SELECT is what makes it
+   * safe under concurrent duplicate deliveries.
+   */
+  const inserted = await db.webhookEvents.insertIfAbsent({
+    providerEventId: event.id,
+    type: event.type,
+    payload: rawBody,
+    receivedAt: new Date(),
+  });
+
+  if (!inserted) {
+    // Already seen. Acknowledge so the provider stops retrying.
+    return new Response(null, { status: 200 });
+  }
+
+  // Hand off to a worker so the response does not wait on business logic.
+  await queue.enqueue('process-webhook', { providerEventId: event.id });
+
+  return new Response(null, { status: 200 });
+}
+```
+
+This separates two concerns that are often mixed: *receipt* is fast, synchronous and idempotent, while
+*processing* is asynchronous, retryable on your own terms, and free to be slow.
+
+### Make processing idempotent too
+
+Recording the event once is not sufficient, because processing itself can partially fail and be
+retried. Each handler needs to be safe to run more than once — usually by keying its effects on the
+event, or by making the state transition conditional.
+
+```typescript title="process-webhook.ts"
+export async function processPaymentSucceeded(event: ProviderEvent): Promise<void> {
+  await db.transaction(async (tx) => {
+    const order = await tx.orders.findByPaymentRef(event.data.paymentId, { forUpdate: true });
+    if (!order) {
+      // The event arrived before the record it refers to. Retry later rather
+      // than discarding it — out-of-order delivery is normal.
+      throw new RetryableError('Order not found yet');
+    }
+
+    // Conditional transition: a duplicate delivery is a no-op rather than a
+    // second fulfilment.
+    if (order.status === 'paid') return;
+
+    await tx.orders.update(order.id, { status: 'paid', paidAt: event.createdAt });
+    await tx.ledger.insert({
+      // Deriving the entry key from the event id makes the write itself idempotent.
+      idempotencyKey: `payment-succeeded:${event.id}`,
+      orderId: order.id,
+      amountCents: event.data.amountCents,
+    });
+  });
+}
+```
+
+### Handle out-of-order events
+
+Because ordering is not guaranteed, a handler must not assume the event it is processing is the latest
+one. Two workable strategies:
+
+**Ignore stale events** by comparing a version or timestamp carried in the payload against what you
+have already stored, and discarding anything older.
+
+**Re-fetch current state** from the provider's API instead of trusting the payload's contents. The
+event then becomes a hint that *something changed about this object*, and the API call establishes what
+is true now. This is more requests but considerably simpler to reason about, and it sidesteps ordering
+entirely.
+
+### Reconcile, because delivery can fail
+
+Every webhook integration needs a second path to the truth. If your endpoint is down for the entire
+retry window, or a provider drops an event, no amount of correct handling will help — you simply never
+hear about it.
+
+The answer is a periodic reconciliation job that lists objects changed in the last window from the
+provider's API and compares them against your own records. This is the same polling you avoided, but
+now running every few minutes over a bounded window rather than continuously over everything, and
+serving as a safety net rather than the primary mechanism.
+
+<Tip>
+Treat webhooks as a latency optimisation over reconciliation, not as the only source of truth. Systems
+built this way survive outages and provider incidents without manual repair; systems that trust
+webhooks completely eventually need someone to fix state by hand.
+</Tip>
+
+## Full lifecycle
+
+<Steps>
+  <Step title="Register the endpoint">
+    Configure the URL and the event types you want with the provider. Store the signing secret as a
+    secret, and support having two valid secrets at once so rotation does not require downtime.
+  </Step>
+  <Step title="An event occurs">
+    Something changes in the provider's system. It creates an event with a stable, unique id.
+  </Step>
+  <Step title="The provider posts to your endpoint">
+    With a signature header and a timestamp, over HTTPS.
+  </Step>
+  <Step title="You verify, deduplicate and acknowledge">
+    Verify the HMAC over the raw body, insert the event under a unique constraint, enqueue the work
+    and return 200 — ideally in well under a second.
+  </Step>
+  <Step title="A worker processes the event">
+    Idempotently, with its own retry policy and backoff, and a dead-letter destination for events that
+    keep failing.
+  </Step>
+  <Step title="Reconciliation catches what was missed">
+    A scheduled job compares recent provider state against yours and repairs any divergence.
+  </Step>
+</Steps>
+
+## Trade-offs
+
+<TradeOffs
+  strengths={[
+    'One request per real event instead of continuous polling.',
+    'Near-real-time notification, typically within seconds.',
+    'The provider absorbs the cost of change detection and retries.',
+    'Scales with the number of events, not with the number of objects being watched.',
+  ]}
+  weaknesses={[
+    'Requires a public endpoint that is correct under duplicates, reordering and hostile input.',
+    'Delivery is best-effort, so a reconciliation path is still mandatory.',
+    'Local development needs tunnelling or replay tooling.',
+    'Debugging is harder — the request originates somewhere you cannot instrument.',
+  ]}
+>
+  The honest summary is that webhooks move work from your polling loop into your correctness
+  requirements. For high-volume or latency-sensitive integrations that is a clear win. For a handful
+  of objects checked hourly, polling is genuinely simpler and worth preferring.
+</TradeOffs>
+
+## Failure scenarios
+
+<FailureScenarios
+  scenarios={[
+    {
+      failure: 'Signature not verified',
+      impact:
+        'Anyone who finds the URL can forge events — marking orders paid, granting subscriptions',
+      mitigation: 'Verify the HMAC over the raw body with a constant-time comparison, before parsing.',
+    },
+    {
+      failure: 'Duplicate delivery processed twice',
+      impact: 'Double fulfilment, double ledger entries, double emails',
+      mitigation:
+        "Unique constraint on the provider's event id, plus conditional state transitions in handlers.",
+    },
+    {
+      failure: 'Slow handler exceeds the provider timeout',
+      impact:
+        'The provider treats success as failure and retries, so events are processed repeatedly and concurrently',
+      mitigation: 'Persist and enqueue, then return 200. Do no business logic in the request path.',
+    },
+    {
+      failure: 'Events arrive out of order',
+      impact: 'A stale update overwrites a newer one — a cancelled order reverts to active',
+      mitigation: 'Compare versions or timestamps before applying, or re-fetch current state from the API.',
+    },
+    {
+      failure: 'Your endpoint is down for the whole retry window',
+      impact: 'Events are lost permanently and your state silently diverges from the provider',
+      mitigation: 'Scheduled reconciliation over a bounded window, and alerting on delivery failures.',
+    },
+    {
+      failure: 'An event references a record you have not created yet',
+      impact: 'The handler cannot find the order and discards the event',
+      mitigation: 'Treat as retryable and back off, rather than acknowledging and dropping.',
+    },
+    {
+      failure: 'Handler always fails on one malformed event',
+      impact: 'A poison message blocks the queue and stalls every later event',
+      mitigation: 'Cap retries, move failures to a dead-letter queue, and alert on its depth.',
+    },
+    {
+      failure: 'Signing secret leaked or rotated',
+      impact: 'Either forged events are accepted, or all legitimate events start failing verification',
+      mitigation:
+        'Store secrets outside the codebase, accept two valid secrets during rotation, rotate on a schedule.',
+    },
+  ]}
+/>
+
+## If you are sending webhooks
+
+The same properties, seen from the other side. Sign every request over the raw body and publish how.
+Include a stable event id and a timestamp so receivers can deduplicate and reject replays. Retry with
+exponential backoff and jitter over hours, not minutes. Give each event type a documented, versioned
+payload shape. Expose delivery history and a manual redelivery control, because your receivers will
+need both. And disable endpoints that fail persistently, so one broken customer does not consume your
+delivery capacity indefinitely.
+
+<KeyTakeaways
+  points={[
+    'A webhook inverts control: the provider calls you, so you must handle untrusted, repeated, unordered input.',
+    'Verify the HMAC over the raw body with a constant-time comparison, before parsing anything.',
+    'Acknowledge within milliseconds by persisting and enqueueing; never process inline.',
+    'Deduplicate with a unique constraint on the event id, and make handlers idempotent as well.',
+    'Never assume ordering — compare versions, or re-fetch current state from the API.',
+    'Delivery is best-effort, so reconciliation is a requirement rather than a nice-to-have.',
+  ]}
+/>

@@ -1,0 +1,5 @@
+{
+  "label": "Indexing",
+  "description": "How databases find rows quickly, and what indexes cost.",
+  "order": 3
+}

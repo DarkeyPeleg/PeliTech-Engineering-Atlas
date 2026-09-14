@@ -1,0 +1,396 @@
+---
+title: 'REST API Design'
+description: 'Designing REST APIs that are predictable to consume and safe to evolve — resources, status codes, errors, pagination, idempotency and versioning.'
+category: 'Backend'
+tags:
+  - api-design
+  - rest
+  - http
+  - backend
+difficulty: 'Intermediate'
+lastUpdated: '2026-09-14'
+relatedTopics:
+  - integrations/webhooks/webhooks-explained
+  - backend/authentication/authentication-vs-authorization
+  - system-design/scalability/load-balancing
+---
+
+An API is the part of your system other people build against, which makes it the part you can least
+afford to get wrong. Internal code can be refactored on a quiet afternoon. A published endpoint has
+callers you cannot see, running versions you do not control, and every mistake in its design
+persists until you can coordinate a migration with all of them.
+
+REST is not a specification. It is a set of constraints described by Roy Fielding in 2000, and what
+most teams call a REST API is an HTTP API that follows some of them. That is fine. What matters in
+practice is not conformance to the dissertation but whether your API is **predictable** — whether a
+developer who has used one endpoint can correctly guess how the next one behaves.
+
+## The problem it solves
+
+Without shared conventions, every endpoint is a small negotiation. One returns `{"data": ...}`,
+another returns the object directly. One signals failure with HTTP 500, another with HTTP 200 and
+`{"success": false}`. One deletes with `POST /deleteUser`, another with `DELETE /users/42`. Each
+choice is defensible alone; together they mean the client must learn every endpoint individually,
+and no generic tooling — HTTP caches, retry middleware, API gateways, monitoring — can reason about
+your API at all.
+
+REST's value is that HTTP already defines meanings for methods, status codes, and headers. When you
+use them as intended, correct behaviour comes for free: a proxy knows `GET` is cacheable, a client
+library knows `503` is worth retrying and `400` is not, a browser knows `PUT` is safe to repeat.
+
+## Core concepts
+
+### Resources, not actions
+
+The central idea is that URLs identify **things**, and HTTP methods say what to do to them. An
+endpoint named for a verb (`/createUser`, `/getUserById`, `/deactivateAccount`) puts the operation in
+the path, which duplicates what the method already expresses and means the path grows without limit.
+
+```http
+# Resource-oriented: one path, methods carry the operation
+GET    /users          # list
+POST   /users          # create
+GET    /users/42       # read
+PATCH  /users/42       # partial update
+DELETE /users/42       # delete
+
+# Sub-resources express relationships
+GET    /users/42/orders
+POST   /users/42/orders
+GET    /users/42/orders/7
+```
+
+Two conventions worth being consistent about: use **plural nouns** for collections (`/users`, not
+`/user`), and keep paths lowercase with hyphens (`/purchase-orders`, not `/purchaseOrders`).
+
+Not everything is a resource, and forcing it produces worse designs than accepting the exception. A
+state transition with rules attached — cancelling an order, sending a password reset, publishing a
+draft — is often clearest as a sub-resource that names the action:
+
+```http
+POST /orders/7/cancellation
+POST /orders/7/refunds
+POST /password-reset-requests
+```
+
+This keeps the operation discoverable and lets it carry its own request body, response and errors,
+rather than being smuggled into a `PATCH` that sets `status: "cancelled"` and hides the business
+rules behind a field assignment.
+
+### Method semantics
+
+Two properties of HTTP methods do real work, and violating them breaks clients and infrastructure in
+ways that are hard to trace.
+
+**Safe** means the request does not change state. `GET`, `HEAD` and `OPTIONS` are safe. Crawlers,
+prefetchers and browsers will issue them speculatively; a `GET` with side effects will eventually be
+triggered by something you did not write.
+
+**Idempotent** means issuing the request twice has the same effect as issuing it once. `GET`, `PUT`
+and `DELETE` are idempotent; `POST` and `PATCH` are not.
+
+<ComparisonTable
+  options={['Safe', 'Idempotent', 'Typical use']}
+  aspectLabel="Method"
+  rows={[
+    { aspect: 'GET', values: ['Yes', 'Yes', 'Read a resource or collection'] },
+    { aspect: 'POST', values: ['No', 'No', 'Create a resource, or trigger an operation'] },
+    { aspect: 'PUT', values: ['No', 'Yes', 'Replace a resource entirely'] },
+    { aspect: 'PATCH', values: ['No', 'No', 'Apply a partial update'] },
+    { aspect: 'DELETE', values: ['No', 'Yes', 'Remove a resource'] },
+  ]}
+/>
+
+`DELETE` being idempotent has a consequence people find counterintuitive: deleting an
+already-deleted resource should be a success, not a `404`. The caller's intent — that the resource
+not exist — has been satisfied. Returning `404` on the retry of a successful delete turns a network
+hiccup into an error the client has to special-case.
+
+### Status codes
+
+Use the codes HTTP already defines, and use the specific one rather than a generic one.
+
+```text
+200 OK                    Request succeeded, body contains the result
+201 Created               Resource created; include a Location header
+202 Accepted              Accepted for asynchronous processing
+204 No Content            Succeeded, deliberately no body (common for DELETE)
+
+400 Bad Request           Malformed syntax or invalid parameters
+401 Unauthorized          No valid credentials  (really: unauthenticated)
+403 Forbidden             Authenticated, but not permitted
+404 Not Found             No such resource
+409 Conflict              Conflicts with current state (duplicate, version mismatch)
+410 Gone                  Existed, permanently removed
+422 Unprocessable Content Syntactically valid, semantically invalid
+429 Too Many Requests     Rate limited; include Retry-After
+
+500 Internal Server Error An unhandled fault on our side
+502 Bad Gateway           An upstream dependency returned garbage
+503 Service Unavailable   Temporarily unable to serve; include Retry-After
+504 Gateway Timeout       An upstream dependency did not respond in time
+```
+
+The 4xx/5xx split carries information clients depend on: 4xx means *the caller must change
+something*, 5xx means *the caller may reasonably retry*. Retry middleware, alerting thresholds and
+error budgets all rely on that distinction, so returning `500` for a validation failure both misleads
+the caller and pollutes your own error rate.
+
+<CommonMistake>
+Returning `200 OK` with `{"success": false, "error": "..."}`. Every layer between you and the caller
+now believes the request succeeded: caches store the failure, retry logic never fires, dashboards
+show a healthy service while users see nothing work. The status code is the machine-readable outcome;
+the body is the detail.
+</CommonMistake>
+
+The `401` versus `403` distinction is worth stating precisely, because the names are misleading.
+`401 Unauthorized` actually means *unauthenticated* — we do not know who you are, or your credentials
+have expired. `403 Forbidden` means *we know who you are and you may not do this*. A client can
+usefully respond to `401` by refreshing a token; there is nothing useful it can do about a `403`.
+
+### Error responses
+
+Errors are part of the API contract and deserve the same design attention as success responses. A
+useful error tells the caller what went wrong, whether retrying could help, and — for validation —
+exactly which fields are at fault.
+
+```json title="422 Unprocessable Content"
+{
+  "type": "https://api.example.com/errors/validation-failed",
+  "title": "Validation failed",
+  "status": 422,
+  "detail": "The request body contains 2 invalid fields.",
+  "instance": "/orders",
+  "traceId": "01JBQK3M8Z7YV4X2N6P9",
+  "errors": [
+    { "field": "quantity", "code": "min_value", "detail": "Must be at least 1." },
+    { "field": "currency", "code": "unsupported", "detail": "GBP is not supported for this seller." }
+  ]
+}
+```
+
+This follows **RFC 9457 Problem Details**, which is worth adopting rather than inventing a shape: a
+stable `type` URI identifying the error class, a human-readable `title` and `detail`, and room for
+your own fields. Two additions earn their place — a machine-readable `code` per field error, so
+clients can localise messages instead of parsing English, and a `traceId` that also appears in your
+logs, so a user reporting a problem gives you something you can search for.
+
+<SecurityNote>
+Error messages leak. `Unknown email address` versus `Incorrect password` tells an attacker which
+accounts exist; a stack trace tells them your framework, versions and file layout; a raw database
+error tells them your schema. Return a generic message with a trace ID to the caller and keep the
+detail in your logs. For authentication specifically, use one indistinguishable failure for every
+cause.
+</SecurityNote>
+
+### Pagination
+
+Any collection that can grow must be paginated from the start. Adding pagination later is a breaking
+change, because existing clients are written to expect all the results.
+
+<TradeOffs
+  strengthsLabel="Offset pagination (?page=3&per_page=50)"
+  weaknessesLabel="Cursor pagination (?cursor=eyJpZCI6NDJ9)"
+  strengths={[
+    'Trivial to implement over SQL LIMIT/OFFSET.',
+    'Allows jumping directly to an arbitrary page.',
+    'Total counts and page numbers are easy to expose.',
+    'Familiar to anyone building a page-numbered UI.',
+  ]}
+  weaknesses={[
+    'Stable under insertions and deletions — no skipped or duplicated rows.',
+    'Consistent performance regardless of depth.',
+    'Cannot jump to page N; only forwards and backwards.',
+    'The cursor must encode a stable, unique sort key.',
+  ]}
+>
+  Offset pagination has two failure modes that get worse with scale. Deep offsets are slow, because
+  `OFFSET 100000` requires the database to walk and discard a hundred thousand rows. And the window
+  shifts underneath the caller: if a row is inserted while someone is paging, an item moves from page
+  2 to page 3 and is returned twice, while a deletion causes one to be skipped entirely. Cursor
+  pagination avoids both by saying "everything after this exact item" rather than "skip this many".
+</TradeOffs>
+
+```json title="GET /orders?limit=50 — cursor-paginated response"
+{
+  "data": [{ "id": "ord_8f2", "total": 4200 }],
+  "pagination": {
+    "next_cursor": "eyJpZCI6Im9yZF84ZjIifQ",
+    "has_more": true
+  }
+}
+```
+
+Note what is absent: a total count. Counting a large filtered table is often more expensive than
+fetching the page itself, so treat totals as an opt-in extra rather than a default.
+
+### Idempotency for unsafe requests
+
+`POST` is not idempotent, but networks make retries unavoidable. If a client sends `POST /payments`
+and the connection drops before the response arrives, the client cannot know whether the payment was
+created. Retrying risks charging twice; not retrying risks not charging at all.
+
+The standard solution is a client-supplied **idempotency key**:
+
+```typescript title="idempotency.ts"
+/**
+ * The caller sends a unique key per logical operation and reuses it on retries.
+ * The first request does the work and stores the response; later requests with
+ * the same key replay it instead of repeating the side effect.
+ */
+export async function createPayment(request: Request): Promise<Response> {
+  const key = request.headers.get('Idempotency-Key');
+  if (!key) {
+    return problem(400, 'Idempotency-Key header is required for this endpoint.');
+  }
+
+  const existing = await idempotencyStore.get(key);
+  if (existing) {
+    // Same key, different body means the client has a bug worth surfacing.
+    if (existing.requestHash !== (await hashBody(request))) {
+      return problem(409, 'This Idempotency-Key was already used with a different request body.');
+    }
+    return new Response(existing.responseBody, {
+      status: existing.responseStatus,
+      headers: { 'Idempotent-Replay': 'true' },
+    });
+  }
+
+  // Reserve the key before doing the work, so two concurrent retries cannot
+  // both pass the check above.
+  const reserved = await idempotencyStore.reserve(key);
+  if (!reserved) {
+    return problem(409, 'A request with this Idempotency-Key is already in progress.');
+  }
+
+  const result = await processPayment(await request.json());
+  await idempotencyStore.complete(key, result);
+  return Response.json(result.body, { status: 201 });
+}
+```
+
+Two details matter. Reserve the key *before* doing the work, or two simultaneous retries will both
+find no stored response and both proceed. And store the response, not just the fact of success — the
+retry needs to return the original resource, including its generated ID.
+
+### Versioning
+
+You will need to make a breaking change eventually. Deciding how before you have callers is much
+cheaper than deciding after.
+
+First, be clear about what is actually breaking. **Adding** an optional field, a new endpoint, or a
+new enum value in a response is usually safe. **Removing** or renaming a field, adding a required
+request field, changing a type, tightening validation, or changing status codes is not.
+
+The two credible strategies are a version in the URL (`/v1/orders`) and a version in a header
+(`Accept: application/vnd.example.v1+json`). URL versioning is less elegant — the version is not
+really part of the resource's identity — and it is what nearly everyone chooses anyway, because it is
+visible in logs, easy to route at a gateway, testable in a browser and impossible to forget. Take
+the pragmatic option.
+
+What matters more than the mechanism is the policy: version the whole API rather than individual
+endpoints, keep the old version running for a defined period, announce deprecation with the
+`Deprecation` and `Sunset` headers, and measure which callers are still using it so you know when it
+is genuinely safe to remove.
+
+## How a well-formed request looks
+
+<Steps>
+  <Step title="The client authenticates">
+    A bearer token in the `Authorization` header. Not a query parameter — those end up in access
+    logs, browser history and referrer headers.
+  </Step>
+  <Step title="The gateway applies coarse limits">
+    Rate limiting and payload size caps happen before application code, so a flood costs you nothing
+    but a rejection.
+  </Step>
+  <Step title="The request is validated against a schema">
+    Reject unknown fields explicitly rather than ignoring them: silently discarding a misspelled
+    field means the caller believes they set something they did not.
+  </Step>
+  <Step title="Authorization is checked on the specific resource">
+    Being authenticated is not permission to touch record 42. This check belongs on every request,
+    not only where it seemed necessary.
+  </Step>
+  <Step title="The operation runs, idempotently if unsafe">
+    Wrapped in a transaction where multiple writes must succeed or fail together.
+  </Step>
+  <Step title="The response states the outcome precisely">
+    `201` with a `Location` header for a creation, `204` for a delete with nothing to say, `409` when
+    the request conflicts with current state.
+  </Step>
+</Steps>
+
+## Failure scenarios
+
+<FailureScenarios
+  scenarios={[
+    {
+      failure: 'A client retries a POST after a timeout',
+      impact: 'Duplicate records — two orders, two charges',
+      mitigation: 'Require an Idempotency-Key on unsafe endpoints and replay the stored response.',
+    },
+    {
+      failure: 'A collection endpoint has no pagination',
+      impact:
+        'One caller requests a table that has grown to millions of rows and exhausts memory for everyone',
+      mitigation: 'Paginate from day one with a default and a maximum page size, enforced server-side.',
+    },
+    {
+      failure: 'Two clients update the same resource concurrently',
+      impact: 'The second write silently overwrites the first — a lost update',
+      mitigation:
+        'Use ETag with If-Match for optimistic concurrency and return 412 Precondition Failed on a stale write.',
+    },
+    {
+      failure: 'A field is renamed in a response',
+      impact: 'Every existing client breaks at once, with no warning',
+      mitigation:
+        'Add the new field alongside the old, deprecate with Sunset headers, remove only after usage reaches zero.',
+    },
+    {
+      failure: 'Validation errors return 500',
+      impact:
+        'Clients retry requests that can never succeed, and your error rate hides real faults',
+      mitigation: 'Map validation failures to 400/422 and reserve 5xx for genuine server faults.',
+    },
+    {
+      failure: 'An upstream dependency hangs',
+      impact:
+        'Requests pile up holding connections until the whole service becomes unresponsive',
+      mitigation:
+        'Bounded timeouts on every outbound call, a circuit breaker, and a degraded response rather than an indefinite wait.',
+    },
+  ]}
+/>
+
+## Scalability considerations
+
+<ScalabilityNote>
+The design choice with the largest effect on load is often cache behaviour. A `GET` that sets
+`Cache-Control` and `ETag` correctly can be served from a CDN or answered with `304 Not Modified`,
+which removes the request from your infrastructure entirely.
+</ScalabilityNote>
+
+Beyond caching, three things matter at scale. **Avoid response shapes that require N+1 queries** —
+if returning a list of orders means one query per order to fetch its items, the endpoint degrades
+linearly with page size. **Let callers ask for less**, through sparse fieldsets
+(`?fields=id,total`) or expansion parameters, so a mobile client is not forced to download a
+representation built for a dashboard. And **make expensive operations asynchronous**: return `202
+Accepted` with a status URL rather than holding a connection open for thirty seconds, which also
+means a client timeout no longer loses the work.
+
+## Design checklist
+
+<KeyTakeaways
+  points={[
+    'URLs name resources; HTTP methods name operations. Reach for an action sub-resource only when a state transition has real rules of its own.',
+    'Respect safety and idempotency — infrastructure you do not control depends on them.',
+    'The status code is the outcome. Never return 200 for a failure.',
+    'Errors follow one documented shape, with per-field codes and a trace ID.',
+    'Paginate every collection from the first release, and prefer cursors for large or changing data.',
+    'Require idempotency keys on unsafe endpoints that have real side effects.',
+    'Decide the versioning and deprecation policy before you have callers, not after.',
+    'Authorize the specific resource on every request, not just authenticate the caller.',
+  ]}
+/>

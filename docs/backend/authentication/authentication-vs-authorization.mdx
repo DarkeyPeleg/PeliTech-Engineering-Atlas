@@ -1,0 +1,350 @@
+---
+title: 'Authentication vs Authorization'
+description: 'Two distinct problems that are routinely conflated: proving who a caller is, and deciding what that caller may do. Why the difference is a security boundary.'
+category: 'Backend'
+tags:
+  - authentication
+  - authorization
+  - security
+  - backend
+difficulty: 'Beginner'
+lastUpdated: '2026-09-14'
+relatedTopics:
+  - backend/api-design/rest-api-design
+  - how-things-work/what-happens-when-you-type-a-url
+---
+
+**Authentication** answers *who are you?* **Authorization** answers *are you allowed to do this?*
+
+They are frequently described as "often confused", which undersells the problem. They are not merely
+confused, they are routinely *collapsed* — and every collapse is a vulnerability, because a system
+that treats "logged in" as "permitted" grants every user the union of everyone's permissions.
+
+## Why the distinction is a security boundary
+
+Consider an endpoint that returns an invoice:
+
+```typescript
+// Authenticated, and completely broken.
+app.get('/invoices/:id', requireLogin, async (request, response) => {
+  const invoice = await db.invoices.findById(request.params.id);
+  response.json(invoice);
+});
+```
+
+`requireLogin` establishes that the caller is a real, logged-in user. It says nothing about *this*
+invoice. Any authenticated user can iterate `/invoices/1`, `/invoices/2`, `/invoices/3` and read
+every invoice in the system.
+
+This is **broken object-level authorization**, and it is consistently among the most common serious
+API vulnerabilities found in the wild. It is not an exotic attack. It requires no tooling beyond
+changing a number in a URL, and it happens because the authentication check *looked* like a security
+check.
+
+The fix is to authorize the specific object, not merely the caller:
+
+```typescript
+app.get('/invoices/:id', requireLogin, async (request, response) => {
+  const invoice = await db.invoices.findById(request.params.id);
+
+  // 404 rather than 403: a 403 confirms the invoice exists, which is itself
+  // information the caller is not entitled to.
+  if (!invoice || !canRead(request.user, invoice)) {
+    return response.status(404).json({ title: 'Not found' });
+  }
+
+  response.json(invoice);
+});
+```
+
+<Warning>
+Authentication is a gate at the entrance. Authorization is a check at every door inside. A building
+with one locked front door and no internal locks is not secure just because everyone inside signed
+the visitors' book.
+</Warning>
+
+## The two problems compared
+
+<ComparisonTable
+  options={['Authentication', 'Authorization']}
+  aspectLabel="Aspect"
+  rows={[
+    {
+      aspect: 'Question answered',
+      values: ['Who is making this request?', 'May this caller do this specific thing?'],
+    },
+    {
+      aspect: 'Runs',
+      values: ['Once per session or token issuance', 'On every request, for every resource touched'],
+    },
+    {
+      aspect: 'Depends on',
+      values: ['Credentials: password, passkey, token, certificate', 'Identity, roles, attributes, resource ownership, current state'],
+    },
+    {
+      aspect: 'Typical answer',
+      values: ['A verified identity, plus a token representing it', 'A yes or no decision, per action and object'],
+    },
+    {
+      aspect: 'Failure status code',
+      values: ['401 — credentials missing, invalid or expired', '403 — identity known, action not permitted'],
+    },
+    {
+      aspect: 'Changes',
+      values: ['Rarely — when a user logs in or their credentials change', 'Constantly — roles, sharing, ownership, subscription state'],
+    },
+    {
+      aspect: 'Consequence of getting it wrong',
+      values: ['Impersonation: an attacker becomes someone else', 'Privilege escalation: a real user does what they should not'],
+    },
+  ]}
+/>
+
+The row that matters most is the fifth. Authentication produces a fact that is stable for the life of
+a session. Authorization produces a decision that can differ between two requests made a second
+apart, because a document was unshared, a subscription lapsed, or an order moved out of a cancellable
+state. This is why authorization cannot be cached into a token and forgotten.
+
+## Authentication in practice
+
+### What counts as a credential
+
+Authentication rests on presenting something the system can verify. The classic categories are
+something you **know** (a password), something you **have** (a phone, a security key), and something
+you **are** (a fingerprint, a face).
+
+Passwords are the weakest of these and still the most common. If you store them, the requirements are
+narrow and non-negotiable: hash with a **memory-hard** algorithm designed for the purpose — Argon2id,
+scrypt, or bcrypt — never a general-purpose hash like SHA-256, which is fast and therefore cheap to
+attack at scale. Each password gets its own salt, which these algorithms handle for you.
+
+```typescript title="password.ts"
+import { hash, verify } from '@node-rs/argon2';
+
+/**
+ * Argon2id is memory-hard: an attacker cannot trade cheap parallel hardware for
+ * speed the way they can against SHA-256. Parameters are the security control,
+ * so tune them to the slowest hardware you must support.
+ */
+const OPTIONS = { memoryCost: 19_456, timeCost: 2, parallelism: 1 };
+
+export function hashPassword(plaintext: string): Promise<string> {
+  return hash(plaintext, OPTIONS);
+}
+
+export async function verifyPassword(stored: string, supplied: string): Promise<boolean> {
+  try {
+    // Argon2's own comparison is constant-time.
+    return await verify(stored, supplied);
+  } catch {
+    return false;
+  }
+}
+```
+
+<SecurityNote>
+Login must fail identically whether the account does not exist or the password is wrong — same
+message, same status, and comparable timing. Distinguishing them turns your login form into an
+account-enumeration oracle. That means verifying against a dummy hash when no user is found, so the
+"no such user" path costs about the same as the real one.
+</SecurityNote>
+
+### Sessions and tokens
+
+Once a caller has been authenticated, they need to prove it on subsequent requests without
+re-authenticating. There are two families of answer, and the difference between them is where the
+state lives.
+
+<TradeOffs
+  strengthsLabel="Server-side sessions"
+  weaknessesLabel="Self-contained tokens (JWT)"
+  strengths={[
+    'Revocation is immediate — delete the session record.',
+    'Permission and profile changes take effect on the next request.',
+    'The identifier is opaque, so nothing is exposed to the client.',
+    'Simple to reason about and hard to get subtly wrong.',
+  ]}
+  weaknesses={[
+    'No session lookup, so verification needs no shared store.',
+    'Works naturally across independently deployed services.',
+    'Cannot be revoked before expiry without reintroducing shared state.',
+    'Claims are a snapshot: stale the moment anything changes.',
+  ]}
+>
+  The decision hinges on revocation. A stateless token cannot be withdrawn — if a user is banned or
+  logs out, their token keeps working until it expires. The standard mitigation is short-lived access
+  tokens (minutes) paired with a long-lived refresh token that *is* stored and revocable, which is a
+  reasonable compromise but note what it means: you have reintroduced server-side state, just at a
+  lower frequency.
+</TradeOffs>
+
+<CommonMistake>
+Putting permissions in a JWT and treating them as current. A token issued when a user was an admin
+still says `role: admin` after their access is removed, for as long as it remains valid. Claims record
+what was true at issuance. Authorization decisions need what is true now.
+</CommonMistake>
+
+If you do use JWTs, a few specifics matter: verify the signature with an explicit expected algorithm
+rather than trusting the token's own `alg` header, check `exp`, and check `aud` and `iss` so a token
+minted for another service is not accepted by yours.
+
+## Authorization in practice
+
+### Models
+
+Authorization models differ in what the decision is based on.
+
+**Role-based (RBAC)** assigns permissions to roles and roles to users. `admin` can delete any order;
+`support` can read any order; `customer` can read their own. It is easy to reason about and easy to
+audit, and it strains when permissions depend on the relationship between the user and the object —
+which is why so many RBAC systems accumulate roles like `regional_manager_emea_readonly`.
+
+**Attribute-based (ABAC)** decides from attributes of the user, the resource, the action and the
+environment: *a manager may approve an expense if it is under £5,000, belongs to their department, and
+is in `pending` state*. Far more expressive, correspondingly harder to audit — answering "who can
+approve this?" now requires evaluating rules rather than reading a list.
+
+**Relationship-based (ReBAC)** decides from a graph of relationships: you may read a document if you
+own it, or it is in a folder you are a member of, or someone shared it with you. This is the natural
+model for anything with nested sharing, and it is what Google's Zanzibar and its open-source
+descendants implement.
+
+Most systems are best served by starting with roles, adding ownership checks where the resource
+belongs to someone, and only reaching for a policy engine when the rules genuinely outgrow that.
+
+### Where the check belongs
+
+The most important structural decision is that authorization must not be optional to remember.
+
+```typescript title="authorize.ts"
+/**
+ * Centralising policy has two benefits: the rules for a resource are readable in
+ * one place, and adding an action to the type forces every caller to be updated.
+ */
+type Action = 'read' | 'update' | 'cancel' | 'refund';
+
+export function can(user: User, action: Action, order: Order): boolean {
+  if (user.roles.includes('admin')) return true;
+
+  const isOwner = order.customerId === user.id;
+
+  switch (action) {
+    case 'read':
+      return isOwner || user.roles.includes('support');
+    case 'update':
+      // State is part of the decision, which is why a token cannot answer this.
+      return isOwner && order.status === 'draft';
+    case 'cancel':
+      return isOwner && ['draft', 'confirmed'].includes(order.status);
+    case 'refund':
+      return user.roles.includes('finance') && order.status === 'paid';
+  }
+}
+
+/** Throwing a not-found keeps existence itself private. */
+export function authorize(user: User, action: Action, order: Order): void {
+  if (!can(user, action, order)) throw new NotFoundError();
+}
+```
+
+Better still, make the safe path the default. Deny by default at the routing layer so a new endpoint
+without an explicit policy is inaccessible rather than open, and scope database queries by owner
+(`WHERE customer_id = $currentUser`) so an unauthorized row cannot be loaded in the first place. A
+missing check should produce a 404, not a leak.
+
+## A complete request
+
+```mermaid caption="Authentication happens once at the edge; authorization happens twice more — at the route, and against the specific object."
+sequenceDiagram
+    participant Client
+    participant API
+    participant Store as Session store
+    participant DB as Database
+
+    Client->>API: POST /orders/7/refunds (Bearer token)
+    API->>Store: Verify token, load identity
+    Store-->>API: user 42, roles [finance]
+    Note over API: Authentication complete — we know who
+    API->>API: Route policy: refund requires finance
+    API->>DB: Load order 7
+    DB-->>API: order 7, status=paid, customer=99
+    API->>API: can(user, 'refund', order) → state and role
+    Note over API: Authorization complete — allowed on this object
+    API->>DB: Create refund (transaction)
+    DB-->>API: refund created
+    API-->>Client: 201 Created
+```
+
+Note the shape: one authentication step, then two authorization checks — a coarse one at the route,
+and a fine one against the loaded object once its state is known. The second cannot be moved earlier,
+because it depends on data that must be read first.
+
+## Failure scenarios
+
+<FailureScenarios
+  scenarios={[
+    {
+      failure: 'Object-level check missing (IDOR)',
+      impact: "Any authenticated user reads or edits other users' records by changing an ID",
+      mitigation:
+        'Authorize the loaded object on every request; scope queries by owner; return 404 rather than 403.',
+    },
+    {
+      failure: 'Permissions read from a token',
+      impact: 'Revoked access keeps working until the token expires',
+      mitigation:
+        'Treat claims as identity only and resolve permissions at request time; keep access tokens short-lived.',
+    },
+    {
+      failure: 'Authorization enforced only in the UI',
+      impact: 'Hidden buttons are not access control — the endpoint is called directly',
+      mitigation: 'Enforce server-side; treat the client as a convenience layer with no authority.',
+    },
+    {
+      failure: 'Login distinguishes unknown user from wrong password',
+      impact: 'Attackers enumerate valid accounts before attempting credentials',
+      mitigation: 'Identical response and comparable timing for every failure cause.',
+    },
+    {
+      failure: 'Session identifier not rotated after login',
+      impact: 'Session fixation — an attacker who planted a session ID inherits the authenticated session',
+      mitigation: 'Issue a fresh session identifier on every privilege change, and invalidate the old one.',
+    },
+    {
+      failure: 'Mass assignment on update',
+      impact:
+        "A user submits {\"role\": \"admin\"} to a profile endpoint that forwards the whole body to the database",
+      mitigation: 'Allowlist updatable fields explicitly; never spread request bodies into a record.',
+    },
+    {
+      failure: 'No rate limiting on authentication',
+      impact: 'Credential stuffing proceeds unimpeded against known email/password pairs',
+      mitigation:
+        'Rate limit per account and per address, add progressive delays, and offer multi-factor authentication.',
+    },
+  ]}
+/>
+
+## Getting the vocabulary right
+
+The HTTP status codes preserve this distinction, and the names are actively misleading:
+
+- **`401 Unauthorized`** means *unauthenticated*. We do not know who you are, or your credentials
+  have expired. A client can act on this by re-authenticating.
+- **`403 Forbidden`** means *unauthorized*. We know exactly who you are and you may not do this.
+  Re-authenticating will not help.
+
+Where the existence of a resource is itself sensitive, prefer `404` over `403` — a `403` confirms
+that record 7 exists and that someone else owns it.
+
+<KeyTakeaways
+  points={[
+    'Authentication establishes identity once. Authorization decides permission on every request.',
+    'Authenticated is not authorized. Missing object-level checks are among the most common serious API flaws.',
+    'Authorization depends on current state, so it cannot be baked into a long-lived token.',
+    'Choose between sessions and self-contained tokens based on how quickly you must revoke access.',
+    'Hash passwords with Argon2id, scrypt or bcrypt — never a fast general-purpose hash.',
+    'Deny by default, scope queries by owner, and centralise policy so a check cannot be forgotten.',
+    '401 means unauthenticated, 403 means not permitted, and 404 protects existence itself.',
+  ]}
+/>

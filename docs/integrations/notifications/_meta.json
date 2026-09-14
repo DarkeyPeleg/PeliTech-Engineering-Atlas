@@ -1,0 +1,5 @@
+{
+  "label": "Notifications",
+  "description": "Email, SMS and push delivery, and their failure modes.",
+  "order": 3
+}

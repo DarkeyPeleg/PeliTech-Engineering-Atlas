@@ -1,0 +1,5 @@
+{
+  "label": "File Storage",
+  "description": "Uploads, object storage and serving user content.",
+  "order": 5
+}

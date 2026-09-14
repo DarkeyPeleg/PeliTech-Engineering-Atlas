@@ -1,0 +1,5 @@
+{
+  "label": "System Design",
+  "description": "How large systems are structured, scaled and kept reliable \u2014 from single-server fundamentals to distributed architecture.",
+  "order": 1
+}

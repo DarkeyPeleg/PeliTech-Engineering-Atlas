@@ -1,0 +1,5 @@
+{
+  "label": "Third-Party APIs",
+  "description": "Consuming external APIs without inheriting their problems.",
+  "order": 7
+}

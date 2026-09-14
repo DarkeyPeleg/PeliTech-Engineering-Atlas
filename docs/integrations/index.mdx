@@ -1,0 +1,23 @@
+---
+title: 'Integrations'
+description: 'Third-party systems from an engineering perspective — payments, identity providers, notifications, storage and webhooks.'
+category: 'Integrations'
+tags:
+  - integrations
+lastUpdated: '2026-09-14'
+toc: false
+---
+
+Integration documentation usually explains which endpoint to call. That is the least interesting
+part. What matters is everything around the call: what happens when the response never arrives, when
+it arrives twice, when the provider's view of the world disagrees with yours, and how you find out.
+
+So these articles are written around lifecycles rather than endpoints. **Payments** covers the full
+path from initialisation through webhook verification to reconciliation. **Identity providers**
+covers delegating authentication over OAuth and OIDC. **Notifications** deals with email, SMS and
+push, all of which can silently not arrive. **Webhooks** is about receiving events from a system you
+do not control, which means duplicates, retries and unverified callers.
+
+Three ideas come up in every one of them: idempotency, because network calls get repeated;
+verification, because an inbound request claiming to be from a provider may not be; and
+reconciliation, because the only way to know two systems agree is to check.

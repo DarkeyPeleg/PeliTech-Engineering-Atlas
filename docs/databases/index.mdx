@@ -1,0 +1,24 @@
+---
+title: 'Databases'
+description: 'Relational and non-relational data: modelling, indexing, transactions, replication and the trade-offs between them.'
+category: 'Databases'
+tags:
+  - databases
+lastUpdated: '2026-09-14'
+toc: false
+---
+
+Almost every serious performance problem and almost every serious correctness problem eventually
+turns out to be a database problem. It is worth understanding these systems properly rather than
+treating them as a place where objects are kept.
+
+**SQL** and **NoSQL** cover the two broad families and what each is actually good at, as opposed to
+what marketing says. **Indexing** explains how a database finds rows without reading all of them,
+and what that speed costs on write. **Transactions** covers atomicity and isolation levels, and the
+anomalies that appear when you relax them. **Normalization** is about controlling redundancy, and
+when denormalizing is the right call. **Replication** copies data for availability, read capacity
+and locality, and introduces the lag that then has to be designed around.
+
+A database is not a passive store. It is a concurrent system with its own scheduler, cache and
+consistency model, and knowing how it makes decisions is what separates a query that returns in a
+millisecond from one that returns in a minute.

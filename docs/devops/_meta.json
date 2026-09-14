@@ -1,0 +1,5 @@
+{
+  "label": "DevOps",
+  "description": "Getting software to production and keeping it healthy: containers, pipelines, deployment, monitoring and infrastructure.",
+  "order": 6
+}

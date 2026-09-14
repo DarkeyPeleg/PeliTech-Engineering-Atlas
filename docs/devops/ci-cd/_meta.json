@@ -1,0 +1,5 @@
+{
+  "label": "CI/CD",
+  "description": "Automating the path from commit to production.",
+  "order": 2
+}

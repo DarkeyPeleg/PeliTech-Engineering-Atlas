@@ -1,0 +1,5 @@
+{
+  "label": "Authorization",
+  "description": "Deciding what an authenticated caller is allowed to do.",
+  "order": 3
+}

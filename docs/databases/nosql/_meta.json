@@ -1,0 +1,5 @@
+{
+  "label": "NoSQL",
+  "description": "Document, key-value, wide-column and graph stores.",
+  "order": 2
+}

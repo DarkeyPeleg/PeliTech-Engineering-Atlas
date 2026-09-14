@@ -1,0 +1,402 @@
+---
+title: 'Database Indexing'
+description: 'How indexes let a database find rows without reading the whole table, why B-trees are the default, and what indexes cost on every write.'
+category: 'Databases'
+tags:
+  - databases
+  - indexing
+  - performance
+  - sql
+difficulty: 'Intermediate'
+lastUpdated: '2026-09-14'
+relatedTopics:
+  - decisions/postgresql-vs-mongodb
+  - system-design/scalability/load-balancing
+---
+
+An index is a separate data structure that lets the database find rows matching a condition without
+examining every row. That is the entire idea. Everything else — B-trees, composite ordering,
+covering indexes, write amplification — follows from the consequences of maintaining such a structure
+alongside the table.
+
+Indexing is where the largest, cheapest performance wins in most applications live. It is also where
+a surprising amount of accidental damage is done, because an index that is never used still costs
+something on every single write.
+
+## The problem it solves
+
+Consider a table of ten million users and a query for one of them:
+
+```sql
+SELECT id, email, created_at FROM users WHERE email = 'ada@example.com';
+```
+
+With no index, the database performs a **sequential scan**: it reads every page of the table from
+disk and checks each row's `email` column. It finds the match, but it cannot know it is the only
+match, so it keeps reading to the end. Ten million rows examined to return one.
+
+With an index on `email`, the same query becomes a **descent through a tree** — a handful of page
+reads to locate the entry, then one more to fetch the row. Roughly four or five reads instead of
+hundreds of thousands.
+
+That difference is not a constant factor. It is the difference between O(n) and O(log n), which is
+why an unindexed query can look perfectly fast on ten thousand development rows and take thirty
+seconds on ten million production rows.
+
+## How a B-tree index works
+
+Nearly every default index in a relational database is a **B+ tree**, and understanding its shape
+explains most indexing behaviour.
+
+```mermaid caption="A B+ tree index. Internal nodes route the search; leaf nodes hold the indexed values and pointers to rows, linked together for range scans."
+flowchart TD
+    Root["Root<br/>[· m · ·]"] --> I1["Internal<br/>[d · h ·]"]
+    Root --> I2["Internal<br/>[q · u ·]"]
+    I1 --> L1["Leaf: ada, bob, cat<br/>→ row pointers"]
+    I1 --> L2["Leaf: dan, eve, fay<br/>→ row pointers"]
+    I2 --> L3["Leaf: raj, sam, tom<br/>→ row pointers"]
+    I2 --> L4["Leaf: uma, vic, zoe<br/>→ row pointers"]
+    L1 -.->|"linked for range scans"| L2
+    L2 -.-> L3
+    L3 -.-> L4
+    class Root service
+    class I1 service
+    class I2 service
+    class L1 datastore
+    class L2 datastore
+    class L3 datastore
+    class L4 datastore
+```
+
+Four properties of this structure do all the work:
+
+**It is balanced.** Every leaf is the same distance from the root, so every lookup costs the same
+number of reads. There is no unlucky key.
+
+**It is shallow.** Each node holds hundreds of keys, because a node is sized to a disk page. With a
+branching factor of a few hundred, three levels index millions of rows and four levels index
+billions. This is why "the index has a tree in it" does not translate into many disk reads.
+
+**Leaves are sorted and linked.** This is what makes an index useful for far more than equality. A
+range query (`WHERE created_at > '2026-01-01'`) descends once to the start of the range then walks the
+leaf chain. An `ORDER BY` on an indexed column can read the leaves in order and skip sorting
+entirely. `MIN` and `MAX` are the first and last leaf entries.
+
+**Leaves point at rows, not contain them.** Which introduces the second read: find the entry, then
+fetch the row. That extra step is what covering indexes eliminate.
+
+## What an index cannot help with
+
+An index on a column stores the values of that column, in order. Any query that does not let the
+database use that ordering cannot use the index — and this is the single most common reason a query
+is slow despite "having an index".
+
+**A function applied to the column.** The index stores `email`, not `LOWER(email)`:
+
+```sql
+-- Cannot use an index on email: the stored values are not lowercased
+SELECT * FROM users WHERE LOWER(email) = 'ada@example.com';
+
+-- Either normalise on write and compare directly,
+SELECT * FROM users WHERE email = 'ada@example.com';
+
+-- or index the expression itself
+CREATE INDEX users_email_lower_idx ON users (LOWER(email));
+```
+
+**A leading wildcard.** `LIKE 'ada%'` can use an index, because it is a range over everything
+starting with `ada`. `LIKE '%example.com'` cannot: the tree is ordered from the left, and the query
+constrains the right. Suffix matching needs a different tool — a reversed-string index, a trigram
+index, or full-text search.
+
+**Low selectivity.** An index on a boolean, or on a status column where 95% of rows are `active`,
+is often skipped deliberately. Reading most of the index and then jumping to most of the rows in
+random order is slower than reading the table sequentially. The planner is usually right about this.
+
+**A type mismatch.** Comparing an indexed `varchar` column to a number, or a `timestamptz` to a
+string, can force an implicit cast on the column side and disable the index.
+
+<CommonMistake>
+Concluding an index is unused because the query is still slow, and adding another. Run `EXPLAIN` and
+find out whether the index was chosen and how many rows it actually eliminated. Adding indexes
+without reading a plan is how tables end up with fifteen indexes and slow writes.
+</CommonMistake>
+
+## Composite indexes and column order
+
+An index on multiple columns is sorted by the first column, then by the second within equal values of
+the first, and so on — like a phone book ordered by surname then first name. The order of columns
+determines which queries it can serve.
+
+```sql
+CREATE INDEX orders_customer_status_created_idx
+  ON orders (customer_id, status, created_at);
+```
+
+This single index serves queries that constrain a **prefix** of its columns:
+
+```sql
+-- Uses the index fully
+WHERE customer_id = 42 AND status = 'paid' AND created_at > '2026-01-01'
+
+-- Uses the first two columns, then walks
+WHERE customer_id = 42 AND status = 'paid'
+
+-- Uses the first column only
+WHERE customer_id = 42
+
+-- Uses the index, and can skip the sort entirely
+WHERE customer_id = 42 AND status = 'paid' ORDER BY created_at DESC
+
+-- Cannot use it: status is not a prefix, so the ordering is useless here
+WHERE status = 'paid'
+```
+
+The last case is the one that surprises people. In the phone book analogy, finding everyone named
+"Ada" regardless of surname means reading the whole book — the ordering by surname does not help you.
+
+This leads to the practical rule for ordering composite columns: **equality conditions first, then
+the range or sort column last**. A column used with `>`, `<` or `BETWEEN` stops the index from being
+usable for anything after it, because once you are scanning a range, the deeper ordering is no longer
+contiguous.
+
+It also means fewer indexes than people expect. The composite index above makes a separate index on
+`(customer_id)` redundant, since `customer_id` is already its leftmost prefix.
+
+### Covering indexes
+
+If an index contains every column a query needs, the database can answer entirely from the index and
+skip fetching rows at all — an **index-only scan**:
+
+```sql
+-- Postgres: INCLUDE adds payload columns to leaves without affecting ordering
+CREATE INDEX orders_customer_covering_idx
+  ON orders (customer_id, created_at) INCLUDE (total_cents, status);
+```
+
+```sql
+-- Answered from the index alone: no table access
+SELECT created_at, total_cents, status
+FROM orders
+WHERE customer_id = 42
+ORDER BY created_at DESC
+LIMIT 20;
+```
+
+This can be several times faster for read-heavy endpoints, because it eliminates the random I/O of
+fetching scattered rows. The cost is a larger index — every included column is duplicated into every
+leaf entry.
+
+### Partial indexes
+
+If queries only ever care about a subset of rows, index only that subset:
+
+```sql
+-- A queue table: millions of processed rows, a few thousand pending ones
+CREATE INDEX jobs_pending_idx ON jobs (created_at) WHERE status = 'pending';
+```
+
+The index stays small no matter how large the table grows, which keeps it in memory and keeps writes
+cheap — rows that do not match the predicate are not indexed at all. This is one of the highest-value
+and most under-used indexing techniques, particularly for queue and soft-delete patterns.
+
+## Index types beyond B-trees
+
+<ComparisonTable
+  options={['Good for', 'Not for']}
+  aspectLabel="Index type"
+  rows={[
+    {
+      aspect: 'B-tree',
+      values: [
+        'Equality, ranges, sorting, prefix matching. The right default for almost everything.',
+        'Suffix/substring matching, containment, high-dimensional data.',
+      ],
+    },
+    {
+      aspect: 'Hash',
+      values: [
+        'Equality only, slightly smaller and faster than B-tree for that one case.',
+        'Ranges, sorting — a hash destroys ordering. Rarely worth choosing.',
+      ],
+    },
+    {
+      aspect: 'GIN (inverted)',
+      values: [
+        'Containment in composite values: JSONB keys, array elements, full-text search.',
+        'Simple scalar equality; writes are noticeably more expensive.',
+      ],
+    },
+    {
+      aspect: 'GiST / SP-GiST',
+      values: ['Geometric and geospatial queries, overlapping ranges, nearest-neighbour.', 'Plain scalar lookups.'],
+    },
+    {
+      aspect: 'BRIN',
+      values: [
+        'Very large tables where rows are physically ordered by the indexed column, such as append-only time series. Tiny by comparison.',
+        'Randomly ordered data, or queries needing precise row location.',
+      ],
+    },
+  ]}
+  caption="Names are Postgres-specific; most databases offer equivalents for the same access patterns."
+/>
+
+## Reading a query plan
+
+`EXPLAIN ANALYZE` is the only reliable way to know what the database is actually doing. It runs the
+query and reports the plan with real timings and row counts.
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT id, total_cents FROM orders
+WHERE customer_id = 42 AND status = 'paid'
+ORDER BY created_at DESC
+LIMIT 20;
+```
+
+```text
+Limit  (cost=0.43..8.91 rows=20 width=16) (actual time=0.028..0.071 rows=20 loops=1)
+  ->  Index Scan using orders_customer_status_created_idx on orders
+        (cost=0.43..421.06 rows=994 width=16) (actual time=0.026..0.066 rows=20 loops=1)
+        Index Cond: ((customer_id = 42) AND (status = 'paid'::text))
+  Buffers: shared hit=6
+Planning Time: 0.132 ms
+Execution Time: 0.094 ms
+```
+
+Four things to look for:
+
+**The access method.** `Index Scan` or `Index Only Scan` means the index is being used. `Seq Scan`
+on a large table with a selective `WHERE` clause means it is not, and that is the finding.
+
+**`Index Cond` versus `Filter`.** Conditions listed as `Index Cond` were used to narrow the search
+inside the index. Conditions listed as `Filter` were applied afterwards, to rows already fetched — so
+the work was done and then discarded. A large `Rows Removed by Filter` is a direct signal that your
+index does not cover the query well.
+
+**Estimated versus actual rows.** `rows=994` estimated against `rows=20` actual is a planner
+misestimate. Bad estimates cause bad plan choices — the wrong join algorithm, the wrong index — and
+usually mean statistics are stale (`ANALYZE`) or the data is skewed.
+
+**Absence of a sort.** Above, `ORDER BY created_at DESC` produced no `Sort` node, because the index
+already provides that order. A `Sort` node with a high `Memory`/`Disk` figure on a paginated query is
+a strong candidate for an index that matches the sort.
+
+## What indexes cost
+
+This is the half of indexing that gets ignored, and it is why "add an index to be safe" is bad advice.
+
+**Every write pays for every index.** An `INSERT` into a table with six indexes performs seven
+write operations: the row, plus an entry in each index tree. `UPDATE` costs even more, because
+changing an indexed column means removing and reinserting entries, and page splits ripple upward. A
+table with many indexes can have its write throughput cut by a large factor.
+
+**Indexes consume memory that reads depend on.** Index pages compete with table data for the buffer
+cache. Unused indexes are still loaded and maintained, evicting pages that queries actually need.
+
+**Indexes consume disk.** It is entirely normal for indexes to exceed the size of the table they
+index, which affects storage cost, backup duration and restore time.
+
+**Indexes must be maintained.** Under heavy update loads B-trees fragment and bloat, requiring
+periodic rebuilds.
+
+<TradeOffs
+  strengths={[
+    'Turns O(n) scans into O(log n) lookups — often orders of magnitude.',
+    'Serves ranges, sorting and MIN/MAX, not just equality.',
+    'Enforces uniqueness as a correctness guarantee, not just a performance one.',
+    'Covering indexes can answer queries without touching the table.',
+  ]}
+  weaknesses={[
+    'Every index slows every insert, update and delete on the table.',
+    'Consumes disk and competes for the buffer cache.',
+    'Only helps queries whose shape matches the index — many do not.',
+    'Needs ongoing attention: statistics, bloat, and pruning indexes nothing uses.',
+  ]}
+>
+  The asymmetry is what makes the decision tractable: a missing index on a hot query is usually a
+  catastrophe, while a redundant index is usually a tax. So index deliberately in response to
+  measured queries, and periodically remove the ones your database reports as unused.
+</TradeOffs>
+
+## Failure scenarios
+
+<FailureScenarios
+  scenarios={[
+    {
+      failure: 'A query works in development and times out in production',
+      impact: 'Sequential scans that were trivial at 10k rows are fatal at 10M',
+      mitigation:
+        'Test against production-scale data volumes, and alert on slow queries rather than waiting for reports.',
+    },
+    {
+      failure: 'CREATE INDEX taken on a live table',
+      impact:
+        'A standard index build locks out writes for the duration — potentially a long outage on a large table',
+      mitigation: 'Use CREATE INDEX CONCURRENTLY (Postgres) or the equivalent online build.',
+    },
+    {
+      failure: 'Indexes accumulate over years',
+      impact: 'Write throughput degrades steadily and no single change appears responsible',
+      mitigation:
+        'Review index usage statistics on a schedule and drop indexes with negligible scan counts.',
+    },
+    {
+      failure: 'Stale planner statistics',
+      impact:
+        'The planner misestimates row counts, chooses a sequential scan or the wrong join, and latency jumps with no code change',
+      mitigation: 'Ensure autovacuum/auto-analyze is keeping up; ANALYZE after bulk loads.',
+    },
+    {
+      failure: 'A UUIDv4 primary key on a large, high-insert table',
+      impact:
+        'Random keys scatter inserts across the whole index, causing page splits, bloat and poor cache locality',
+      mitigation:
+        'Use a time-ordered identifier (UUIDv7, ULID) or a bigint sequence so inserts append to the right edge of the tree.',
+    },
+    {
+      failure: 'Index bloat under heavy updates',
+      impact: 'The index grows well beyond its useful size and lookups slow as depth increases',
+      mitigation: 'Monitor index size against row count and REINDEX CONCURRENTLY when it diverges.',
+    },
+  ]}
+/>
+
+## Practical method
+
+<Steps>
+  <Step title="Find the queries that actually matter">
+    Use the database's own statistics — `pg_stat_statements` or the slow query log — ranked by total
+    time, not by worst single execution. A 5ms query run a million times an hour costs more than a
+    2-second report run nightly.
+  </Step>
+  <Step title="Read the plan before changing anything">
+    `EXPLAIN ANALYZE` the real query with realistic parameters. Confirm what the bottleneck is rather
+    than assuming it is a missing index; it may be an N+1 pattern or an unnecessary sort.
+  </Step>
+  <Step title="Design the index for the whole query">
+    Equality columns first, then the range or sort column. Check whether the existing indexes already
+    provide a usable prefix before adding another.
+  </Step>
+  <Step title="Consider partial and covering variants">
+    If the query only touches a subset of rows, add a `WHERE` predicate to the index. If it selects
+    few columns, consider `INCLUDE` for an index-only scan.
+  </Step>
+  <Step title="Measure, then prune">
+    Re-run the plan to confirm the index is chosen and the row estimates are sane. Then check whether
+    any existing index has become redundant.
+  </Step>
+</Steps>
+
+<KeyTakeaways
+  points={[
+    'An index is a sorted structure beside the table; every capability and limitation follows from that.',
+    'B-trees serve equality, ranges and ordering, which is why they are the default.',
+    'A function on the column, a leading wildcard, or low selectivity all prevent index use.',
+    'In a composite index, only a leftmost prefix is usable — column order is the design decision.',
+    'Partial and covering indexes are the highest-leverage refinements and the most overlooked.',
+    'Every index taxes every write. Add them for measured queries and drop the ones nothing uses.',
+    'EXPLAIN ANALYZE is the ground truth. Do not tune indexes without reading a plan.',
+  ]}
+/>

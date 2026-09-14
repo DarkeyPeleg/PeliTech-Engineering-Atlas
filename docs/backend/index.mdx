@@ -1,0 +1,23 @@
+---
+title: 'Backend'
+description: 'The server side in depth: API design, authentication and authorization, background work, queues and realtime delivery.'
+category: 'Backend'
+tags:
+  - backend
+lastUpdated: '2026-09-14'
+toc: false
+---
+
+The backend is where correctness is decided. A user interface can be rebuilt; data that was written
+wrongly, or exposed to the wrong person, is a much harder problem.
+
+**API design** is the contract other engineers work against, and the decisions there outlive most of
+the code behind them. **Authentication** establishes who a caller is; **authorization** decides what
+that caller may do — two genuinely different problems that are frequently conflated, usually with
+security consequences. **Background jobs** and **queues** cover work that should not happen inside a
+request, and what you take on by moving it elsewhere. **Realtime** is about pushing changes to
+clients rather than waiting to be asked.
+
+The recurring theme is that a backend is a set of promises made to callers under conditions you do
+not control: duplicate requests, half-finished writes, dependencies that time out, clients that
+disappear mid-operation.

@@ -1,0 +1,5 @@
+{
+  "label": "Architecture",
+  "description": "Structural patterns for organising services and their boundaries.",
+  "order": 2
+}

@@ -1,0 +1,5 @@
+{
+  "label": "Identity Providers",
+  "description": "Delegating authentication to OAuth and OIDC providers.",
+  "order": 2
+}

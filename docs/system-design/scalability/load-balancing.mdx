@@ -1,0 +1,475 @@
+---
+title: 'What Is a Load Balancer?'
+description: 'Why load balancers exist, how they distribute traffic, the algorithms and health checks involved, and the failure modes they introduce.'
+category: 'System Design'
+tags:
+  - load-balancing
+  - scalability
+  - networking
+  - high-availability
+difficulty: 'Beginner'
+lastUpdated: '2026-09-14'
+relatedTopics:
+  - system-design/scalability/horizontal-vs-vertical-scaling
+  - decisions/monolith-vs-microservices
+  - backend/api-design/rest-api-design
+---
+
+A load balancer sits in front of a group of servers and decides which one handles each incoming
+request. That single sentence describes the mechanism, but it undersells what the component does:
+by putting one addressable thing in front of many interchangeable things, a load balancer is what
+makes it possible to add capacity, replace a server, or lose a server without the client noticing.
+
+## The problem it solves
+
+Start with the simplest deployment: one application server, one public address. Clients resolve
+your domain to that server's IP and connect directly.
+
+This works until it doesn't, and it fails in two distinct ways.
+
+**It runs out of capacity.** A single machine has a finite number of CPU cores, a finite amount of
+memory, and a finite number of open sockets. You can buy a bigger machine — vertical scaling — but
+that has a ceiling, gets expensive faster than it gets powerful, and requires downtime to do.
+
+**It is a single point of failure.** When that machine stops — a crash, a full disk, a kernel
+panic, a deploy gone wrong, a datacentre losing power — the service is down. Not degraded. Down.
+There is no other server, and even if you started one, clients are resolving DNS to an address
+that no longer answers.
+
+Both problems have the same shape: you need more than one server. And the moment you have more
+than one server, you need something to decide which one a given request goes to.
+
+```mermaid caption="Without a load balancer the client is coupled to one specific server; with one, it is coupled to an address that can point anywhere."
+flowchart LR
+    subgraph before [Single server]
+        C1[Client] --> S1[Server]
+    end
+    subgraph after [Behind a load balancer]
+        C2[Client] --> LB[Load balancer]
+        LB --> A[Server A]
+        LB --> B[Server B]
+        LB --> Cc[Server C]
+    end
+    class LB service
+    class S1 service
+    class A service
+    class B service
+    class Cc service
+    class C1 external
+    class C2 external
+```
+
+## Why it matters
+
+A load balancer is the component that turns "a server" into "a pool of servers", and almost every
+other scalability technique assumes that pool exists.
+
+- **Horizontal scaling becomes possible.** Adding capacity means starting another instance and
+  registering it, rather than migrating to a bigger machine.
+- **Deployments stop requiring downtime.** You can remove one instance from rotation, update it,
+  put it back, and repeat. Clients keep being served by the instances still in rotation.
+- **Individual failures stop being outages.** If the balancer knows an instance is unhealthy, it
+  stops sending traffic there. The pool absorbs the loss.
+- **Servers stop needing public addresses.** Only the balancer is exposed, so application instances
+  can live in a private network — a meaningful reduction in attack surface.
+
+## Core concepts
+
+### Layer 4 versus layer 7
+
+Where a balancer operates in the network stack determines what it can see and therefore what it can
+do.
+
+A **layer 4** balancer works at the transport layer. It sees TCP or UDP packets: source and
+destination IP addresses and ports. It forwards connections without inspecting their contents. It
+is fast, protocol-agnostic, and can balance anything — HTTP, database connections, custom binary
+protocols.
+
+A **layer 7** balancer works at the application layer. It terminates the connection, parses the
+HTTP request, and can make decisions using the method, path, headers, cookies or body. That
+enables path-based routing (`/api/*` to one pool, `/images/*` to another), header-based routing,
+TLS termination, request rewriting, and response compression — at the cost of doing real parsing
+work per request.
+
+The practical rule: use layer 7 for HTTP traffic where routing decisions and TLS termination are
+useful, and layer 4 when you need raw throughput or are balancing a non-HTTP protocol.
+
+### Health checks
+
+A balancer's usefulness depends entirely on knowing which instances can actually serve traffic. It
+learns this by probing them.
+
+An **active health check** means the balancer periodically requests a known endpoint — commonly
+`/health` — and marks the instance unhealthy after a threshold of consecutive failures. A
+**passive** check infers health from real traffic: a burst of connection errors or 5xx responses
+takes an instance out of rotation.
+
+Two details matter more than they appear to:
+
+The check must reflect what the instance actually needs to serve requests. An endpoint that returns
+`200 OK` from the web framework without touching the database will happily report health while
+every real request fails on a dead connection pool. The opposite mistake is just as bad: a health
+check that queries the database means a brief database problem marks *every* instance unhealthy at
+once, and the balancer takes the entire pool out of rotation, converting a slow database into a
+total outage.
+
+The thresholds decide how fast you shed a broken instance versus how often you remove a healthy one
+over a transient blip. Removing after one failed check is twitchy; removing after ten failures at
+a 10-second interval means nearly two minutes of errors.
+
+<Tip>
+A useful split is a shallow liveness endpoint for the balancer (is this process able to respond at
+all?) and a deeper readiness endpoint checked less aggressively, with dependency failures handled
+as degraded responses rather than as instance death.
+</Tip>
+
+### Session affinity
+
+If a request can be handled by any instance, balancing is straightforward. It stops being
+straightforward when an instance holds state a subsequent request needs — a session stored in local
+memory, an uploaded file on local disk, a WebSocket connection.
+
+**Session affinity** (or "sticky sessions") makes the balancer route requests from the same client
+to the same instance, usually by hashing the client IP or by setting a cookie. It works, and it
+undermines much of what you gained: load spreads unevenly because clients are not uniform, removing
+an instance destroys the sessions pinned to it, and autoscaling is less effective because existing
+clients stay pinned to existing instances.
+
+The better answer is usually to remove the local state rather than to route around it — sessions in
+a shared store like Redis, files in object storage, a signed token the client presents on each
+request. Affinity is a reasonable accommodation for protocols that are genuinely connection-bound,
+and a workaround everywhere else.
+
+## Balancing algorithms
+
+The algorithm decides which instance gets the next request. The right choice depends on how uniform
+your requests and instances are.
+
+<ComparisonTable
+  options={['How it works', 'Best when', 'Weakness']}
+  aspectLabel="Algorithm"
+  rows={[
+    {
+      aspect: 'Round robin',
+      values: [
+        'Instances take turns in order.',
+        'Requests cost about the same and instances are identical.',
+        'A slow instance still receives its full share.',
+      ],
+    },
+    {
+      aspect: 'Weighted round robin',
+      values: [
+        'Turns are allocated in proportion to a configured weight.',
+        'Instances have different capacity, or you are shifting traffic gradually.',
+        'Weights are static, so they do not react to actual load.',
+      ],
+    },
+    {
+      aspect: 'Least connections',
+      values: [
+        'The instance with the fewest active connections wins.',
+        'Request durations vary widely.',
+        'Connection count is a rough proxy for actual work.',
+      ],
+    },
+    {
+      aspect: 'Least response time',
+      values: [
+        'Combines active connections with observed latency.',
+        'You want to route away from instances that are struggling.',
+        'Can oscillate, and needs reliable latency measurement.',
+      ],
+    },
+    {
+      aspect: 'IP hash',
+      values: [
+        'A hash of the client address selects the instance.',
+        'You need affinity without cookies.',
+        'Uneven distribution; adding an instance reshuffles clients.',
+      ],
+    },
+    {
+      aspect: 'Consistent hashing',
+      values: [
+        'Instances and keys map onto a hash ring.',
+        'Cache locality matters and the pool changes size.',
+        'More complex; needs virtual nodes to distribute evenly.',
+      ],
+    },
+  ]}
+  caption="Round robin and least connections cover the large majority of HTTP workloads."
+/>
+
+Round robin is the sensible default for stateless HTTP services. Least connections earns its keep
+when some requests take milliseconds and others take seconds, because round robin will cheerfully
+hand a new request to an instance already tied up with slow ones.
+
+Consistent hashing deserves a specific mention, because it solves a problem plain hashing creates.
+With `instance = hash(key) % n`, changing `n` remaps almost every key — catastrophic if each
+instance holds a cache keyed that way. Consistent hashing places instances at points on a ring and
+assigns each key to the next instance clockwise, so adding or removing one instance only remaps the
+keys in its arc.
+
+## How a request actually flows
+
+<Steps>
+  <Step title="The client resolves your domain">
+    DNS returns the load balancer's address — often several, in different availability zones. The
+    application instances are not in DNS at all.
+  </Step>
+  <Step title="The connection is established">
+    For a layer 7 HTTPS balancer, the TLS handshake terminates *at the balancer*. It holds the
+    certificate and the private key, and application instances typically receive plain HTTP over
+    the private network, or a separately encrypted connection.
+  </Step>
+  <Step title="The balancer selects an instance">
+    From the pool of instances currently marked healthy, using the configured algorithm. Unhealthy
+    instances are not candidates.
+  </Step>
+  <Step title="The request is forwarded">
+    Usually over a pooled, keep-alive connection to avoid a fresh TCP and TLS handshake per request.
+    The balancer adds forwarding headers — `X-Forwarded-For` with the client IP,
+    `X-Forwarded-Proto` with the original scheme — because the instance now sees the balancer as its
+    peer, not the client.
+  </Step>
+  <Step title="The response returns through the balancer">
+    Which is where response compression, header manipulation and access logging happen.
+  </Step>
+  <Step title="Failures may be retried">
+    If the chosen instance refuses the connection, a balancer can usually retry against another
+    instance. This is safe only for requests that are safe to repeat — see the failure modes below.
+  </Step>
+</Steps>
+
+## Implementation example
+
+The concepts are clearest in a configuration file. This is nginx as a layer 7 balancer with health
+checks, weighted upstreams and forwarding headers:
+
+```nginx title="nginx.conf"
+upstream app_pool {
+    least_conn;
+
+    # max_fails/fail_timeout is nginx's passive health checking: three failed
+    # attempts within 30s takes the instance out of rotation for 30s.
+    server 10.0.1.10:8080 max_fails=3 fail_timeout=30s;
+    server 10.0.1.11:8080 max_fails=3 fail_timeout=30s;
+    # A smaller instance, so it takes a smaller share.
+    server 10.0.1.12:8080 weight=1 max_fails=3 fail_timeout=30s;
+
+    keepalive 32;
+}
+
+server {
+    listen 443 ssl;
+    server_name api.example.com;
+
+    ssl_certificate     /etc/ssl/example.crt;
+    ssl_certificate_key /etc/ssl/example.key;
+
+    location / {
+        proxy_pass http://app_pool;
+
+        # The instance sees the balancer as its peer, so pass the real client
+        # details explicitly. Trust these headers only from your own balancer.
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Bound how long a single instance can hold a request.
+        proxy_connect_timeout 2s;
+        proxy_read_timeout    30s;
+
+        # Retry another instance only for failures where the request certainly
+        # was not processed.
+        proxy_next_upstream error timeout http_502 http_503;
+        proxy_next_upstream_tries 2;
+    }
+}
+```
+
+The application side is mostly about being honest in the health endpoint:
+
+```typescript title="health.ts"
+import type { Request, Response } from 'express';
+
+/**
+ * Liveness: can this process respond at all? Deliberately checks nothing
+ * external, so a database problem does not empty the entire pool at once.
+ */
+export function liveness(_request: Request, response: Response): void {
+  response.status(200).json({ status: 'ok' });
+}
+
+/**
+ * Readiness: should this instance receive traffic right now? Checked less
+ * aggressively, and used to drain an instance before shutdown.
+ */
+export async function readiness(_request: Request, response: Response): Promise<void> {
+  if (shuttingDown) {
+    // Tell the balancer to stop sending work while in-flight requests finish.
+    response.status(503).json({ status: 'draining' });
+    return;
+  }
+
+  try {
+    await db.query('SELECT 1');
+    response.status(200).json({ status: 'ready' });
+  } catch {
+    response.status(503).json({ status: 'dependency_unavailable' });
+  }
+}
+
+let shuttingDown = false;
+
+/**
+ * Graceful shutdown is what makes zero-downtime deploys real: fail readiness
+ * first, wait for the balancer to notice, then stop accepting connections.
+ */
+process.on('SIGTERM', () => {
+  shuttingDown = true;
+  setTimeout(() => server.close(() => process.exit(0)), 10_000);
+});
+```
+
+<CommonMistake>
+Exiting immediately on `SIGTERM`. The balancer has not yet noticed the instance is going away, so
+it keeps forwarding requests to a socket that is closing, and users see errors during every deploy.
+Fail the readiness check first, wait longer than one health-check interval, then close.
+</CommonMistake>
+
+## Trade-offs
+
+<TradeOffs
+  strengths={[
+    'Horizontal scaling and rolling deploys become routine operations.',
+    'A single instance failure stops being a user-visible outage.',
+    'One public entry point, so application servers can stay private.',
+    'A natural place for TLS termination, access logging and rate limiting.',
+  ]}
+  weaknesses={[
+    'A new component in the request path, with its own latency and failure modes.',
+    'Becomes the single point of failure unless it is itself redundant.',
+    'Obscures the client IP, breaking naive rate limiting and audit logging.',
+    'Adds operational surface: certificates, timeouts, health checks, connection limits.',
+  ]}
+>
+  The trade is almost always worth making for any service that must stay available, but note that
+  the balancer does not remove the single point of failure so much as move it. Which is why
+  production balancers are deployed as redundant pairs or as a managed service spanning multiple
+  availability zones.
+</TradeOffs>
+
+## Failure scenarios
+
+<FailureScenarios
+  scenarios={[
+    {
+      failure: 'The load balancer itself fails',
+      impact: 'Total outage — every request goes through it',
+      mitigation:
+        'Redundant balancers sharing a floating address, or a managed multi-zone balancer. DNS with multiple A records and short TTLs as a coarse backstop.',
+    },
+    {
+      failure: 'Health check is too shallow',
+      impact:
+        'Broken instances stay in rotation, so a predictable fraction of requests fail with no obvious cause',
+      mitigation:
+        'Check what serving a request actually needs, and monitor per-instance error rates rather than trusting the check alone.',
+    },
+    {
+      failure: 'Health check is too deep',
+      impact:
+        'A shared dependency wobbles, every instance fails its check at once, and the pool empties — a slow database becomes a full outage',
+      mitigation:
+        'Keep dependency checks out of liveness; degrade rather than die; some balancers can fail open when no instance is healthy.',
+    },
+    {
+      failure: 'Retrying a non-idempotent request',
+      impact: 'Duplicate side effects — a payment charged twice, an order created twice',
+      mitigation:
+        'Retry only on errors that prove the request was never processed (connection refused), and make write endpoints idempotent with client-supplied keys.',
+    },
+    {
+      failure: 'Sticky sessions plus instance loss',
+      impact: 'Every user pinned to that instance is logged out or loses in-progress work',
+      mitigation: 'Move session state to a shared store so any instance can serve any request.',
+    },
+    {
+      failure: 'Thundering herd after a restart',
+      impact:
+        'A cold instance receives its full share immediately, with empty caches and unwarmed pools, so its latency spikes',
+      mitigation:
+        'Slow-start ramping, or a readiness check that stays failing until caches and pools are warm.',
+    },
+    {
+      failure: 'Connection or file-descriptor exhaustion at the balancer',
+      impact: 'New connections are refused even though instances are idle',
+      mitigation:
+        'Raise limits deliberately, use keep-alive to upstreams, and monitor connection counts as a first-class metric.',
+    },
+  ]}
+/>
+
+## Security considerations
+
+<SecurityNote>
+The balancer terminates TLS, which means it holds your private keys and is the natural enforcement
+point for transport security. It is also the boundary where client-supplied information stops being
+trustworthy.
+</SecurityNote>
+
+- **Never trust forwarding headers from outside.** `X-Forwarded-For` is a client-settable header.
+  If your application reads it without knowing which hops are trusted, an attacker can spoof any
+  client IP — defeating IP rate limits, IP allowlists and audit trails. Configure the number of
+  trusted proxies explicitly and read the correct entry from the right end of the chain.
+- **Terminate TLS, but consider the leg behind it.** Plain HTTP between balancer and instance is
+  common and acceptable inside a private network you control. It is not acceptable across a shared
+  or untrusted network.
+- **Rate limit at the edge.** The balancer sees traffic before it reaches application code, which
+  makes it the cheapest place to reject floods and the only place that protects the application from
+  its own connection limits being exhausted.
+- **Do not leak topology.** Upstream server names, internal addresses and framework versions in
+  response headers give an attacker a map of your deployment. Strip them.
+- **Keep the pool private.** If instances remain reachable on public addresses, every protection
+  configured at the balancer can be bypassed by addressing an instance directly.
+
+## Scalability considerations
+
+<ScalabilityNote>
+A load balancer removes the application tier as the bottleneck, which usually just relocates the
+bottleneck. Expect the next constraint to be the database, a shared cache, or the balancer's own
+connection capacity.
+</ScalabilityNote>
+
+Beyond a single balancer, capacity is added in layers. **DNS-level distribution** returns different
+addresses to different clients, spreading load across balancers and regions — cheap, but DNS
+caching makes it slow to react to failure. **Anycast** advertises one address from multiple
+locations and lets the network route to the nearest, which is how global services present a single
+IP. Within a region, **multiple balancers** sit behind that address, each fronting its own pool.
+
+Two properties of the application matter more than any balancer configuration. Instances must be
+genuinely interchangeable, because affinity limits how evenly load can be spread and how freely
+instances can be replaced. And instances must start quickly, because autoscaling cannot respond to
+a traffic spike if a new instance takes five minutes to become useful.
+
+## When to use one
+
+Use a load balancer when the service must survive losing a server, when you want to deploy without
+downtime, when a single instance cannot handle peak traffic, or when you want one enforcement point
+for TLS and rate limiting. In practice that is nearly every production HTTP service, which is why
+managed balancers are a default rather than an optimisation.
+
+You can reasonably skip it for a single-instance internal tool where restarting is acceptable, for
+a local development setup, or for a static site served by a CDN — a CDN is already doing this job,
+among others. Be aware that "we will add it later" means retrofitting shared session state and
+health endpoints under time pressure, which is a worse time to do that work.
+
+## Related concepts
+
+Load balancing is the mechanism, not the goal. It exists to enable horizontal scaling, it
+implements a slice of high availability, and it overlaps heavily with reverse proxying — most
+reverse proxies can balance, and most layer 7 balancers are reverse proxies. Caching frequently
+lives at the same layer, because the balancer is already the one component that sees every request.

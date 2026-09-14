@@ -1,0 +1,5 @@
+{
+  "label": "Notification System",
+  "description": "Multi-channel delivery, preferences and rate limits.",
+  "order": 5
+}

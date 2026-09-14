@@ -1,0 +1,5 @@
+{
+  "label": "Replication",
+  "description": "Copying data for availability, locality and read capacity.",
+  "order": 6
+}

@@ -1,0 +1,5 @@
+{
+  "label": "Integrations",
+  "description": "Third-party systems from an engineering perspective \u2014 payments, auth providers, notifications, storage and webhooks.",
+  "order": 4
+}

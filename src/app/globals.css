@@ -1,0 +1,279 @@
+@import 'tailwindcss';
+@import './theme.css';
+
+/* =============================================================================
+ * Base
+ * ========================================================================== */
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+    /* Offset anchor jumps so headings clear the 56px sticky header. */
+    scroll-padding-top: var(--spacing-80);
+    -webkit-text-size-adjust: 100%;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
+  }
+
+  body {
+    background-color: var(--color-surface);
+    color: var(--color-ink);
+    font-family: var(--font-charlie-text);
+    font-size: var(--text-body);
+    line-height: var(--text-body--line-height);
+    font-weight: var(--font-weight-regular);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: var(--font-charlie-display);
+    font-weight: var(--font-weight-medium);
+    color: var(--color-ink);
+    text-wrap: balance;
+  }
+
+  /* One focus treatment everywhere, in the single action color. */
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+    border-radius: var(--radius-nav);
+  }
+
+  ::selection {
+    background-color: var(--color-accent-soft);
+    color: var(--color-ink);
+  }
+}
+
+/* =============================================================================
+ * article-prose — the reading surface for MDX content.
+ *
+ * Hand-written against the design.md type scale rather than using
+ * @tailwindcss/typography, whose defaults would have to be overridden on nearly
+ * every element to reach these values.
+ * ========================================================================== */
+
+@layer components {
+  .article-prose {
+    color: var(--color-ink-body);
+    font-size: var(--text-body);
+    line-height: var(--text-body--line-height);
+  }
+
+  /* ---- Headings ---- */
+
+  .article-prose h2 {
+    font-size: var(--text-heading);
+    line-height: var(--text-heading--line-height);
+    letter-spacing: var(--tracking-display);
+    margin-block: var(--spacing-48) var(--spacing-16);
+    padding-top: var(--spacing-8);
+    border-top: 1px solid var(--color-border-subtle);
+  }
+
+  .article-prose h2:first-child {
+    margin-top: 0;
+    border-top: none;
+    padding-top: 0;
+  }
+
+  .article-prose h3 {
+    font-size: var(--text-heading-sm);
+    line-height: var(--text-heading-sm--line-height);
+    margin-block: var(--spacing-32) var(--spacing-12);
+  }
+
+  .article-prose h4 {
+    font-size: var(--text-subheading);
+    line-height: var(--text-subheading--line-height);
+    margin-block: var(--spacing-24) var(--spacing-8);
+  }
+
+  /* Anchor links revealed on hover, per heading. */
+  .article-prose :is(h2, h3, h4) > a.heading-anchor {
+    color: var(--color-ink-muted);
+    margin-left: var(--spacing-8);
+    opacity: 0;
+    text-decoration: none;
+    font-weight: var(--font-weight-regular);
+    transition: opacity 120ms ease-in-out;
+  }
+
+  .article-prose :is(h2, h3, h4):hover > a.heading-anchor,
+  .article-prose :is(h2, h3, h4) > a.heading-anchor:focus-visible {
+    opacity: 1;
+  }
+
+  /* ---- Block flow ---- */
+
+  .article-prose p {
+    margin-block: var(--spacing-16);
+  }
+
+  .article-prose :is(ul, ol) {
+    margin-block: var(--spacing-16);
+    padding-left: var(--spacing-24);
+  }
+
+  .article-prose ul {
+    list-style: disc;
+  }
+
+  .article-prose ol {
+    list-style: decimal;
+  }
+
+  .article-prose li {
+    margin-block: var(--spacing-8);
+  }
+
+  .article-prose li::marker {
+    color: var(--color-ink-muted);
+  }
+
+  .article-prose :is(ul, ol) :is(ul, ol) {
+    margin-block: var(--spacing-8);
+  }
+
+  .article-prose strong {
+    font-weight: var(--font-weight-bold);
+    color: var(--color-ink);
+  }
+
+  .article-prose a {
+    color: var(--color-accent);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  .article-prose blockquote {
+    margin-block: var(--spacing-24);
+    padding: var(--spacing-4) var(--spacing-20);
+    border-left: 2px solid var(--color-accent);
+    color: var(--color-ink-muted);
+  }
+
+  .article-prose hr {
+    margin-block: var(--spacing-40);
+    border: none;
+    border-top: 1px solid var(--color-border-subtle);
+  }
+
+  /* ---- Tables ---- */
+
+  .article-prose table {
+    width: 100%;
+    margin-block: var(--spacing-24);
+    border-collapse: collapse;
+    font-size: var(--text-ui);
+    line-height: var(--text-body--line-height);
+    text-align: left;
+  }
+
+  .article-prose thead {
+    border-bottom: 1px solid var(--color-border-disabled);
+  }
+
+  .article-prose th {
+    padding: var(--spacing-8) var(--spacing-12);
+    font-weight: var(--font-weight-medium);
+    color: var(--color-ink);
+    vertical-align: bottom;
+  }
+
+  .article-prose td {
+    padding: var(--spacing-8) var(--spacing-12);
+    border-bottom: 1px solid var(--color-border-subtle);
+    vertical-align: top;
+  }
+
+  /* ---- Inline code ---- */
+
+  .article-prose :not(pre) > code {
+    font-family: var(--font-mono);
+    font-size: 0.875em;
+    background-color: var(--color-surface-soft);
+    color: var(--color-ink);
+    padding: 2px var(--spacing-4);
+    border-radius: var(--radius-images);
+    /* Long identifiers should wrap rather than force a horizontal scrollbar. */
+    overflow-wrap: break-word;
+  }
+
+  .article-prose h2 code,
+  .article-prose h3 code,
+  .article-prose h4 code {
+    font-size: 0.9em;
+  }
+
+  /* ---- Footnotes (remark-gfm) ---- */
+
+  .article-prose .footnotes {
+    margin-top: var(--spacing-48);
+    padding-top: var(--spacing-16);
+    border-top: 1px solid var(--color-border-subtle);
+    font-size: var(--text-caption);
+    color: var(--color-ink-muted);
+  }
+}
+
+/* =============================================================================
+ * Code blocks — Dark Panel treatment (see design.md, Project-Specific Decisions)
+ * ========================================================================== */
+
+@layer components {
+  /* rehype-pretty-code emits both themes; we keep only the dark one. */
+  .code-block pre {
+    background-color: var(--color-surface-inverted) !important;
+    color: var(--color-ink-inverted);
+    font-family: var(--font-mono);
+    font-size: var(--text-ui);
+    line-height: 1.6;
+    padding-block: var(--spacing-16);
+    overflow-x: auto;
+    tab-size: 2;
+  }
+
+  .code-block pre > code {
+    display: grid;
+    background: transparent;
+  }
+
+  /* Padding sits on the line so highlighted rows can span the full width. */
+  .code-block [data-line] {
+    padding-inline: var(--spacing-20);
+    border-left: 2px solid transparent;
+  }
+
+  .code-block [data-highlighted-line] {
+    background-color: rgb(255 255 255 / 0.07);
+    border-left-color: var(--color-accent);
+  }
+
+  .code-block [data-highlighted-chars] {
+    background-color: rgb(255 255 255 / 0.12);
+    border-radius: var(--radius-images);
+    padding: 1px var(--spacing-4);
+  }
+
+  .code-block code[data-line-numbers] {
+    counter-reset: line;
+  }
+
+  .code-block code[data-line-numbers] > [data-line]::before {
+    counter-increment: line;
+    content: counter(line);
+    display: inline-block;
+    width: 1.5rem;
+    margin-right: var(--spacing-16);
+    text-align: right;
+    color: var(--color-border-disabled);
+  }
+}

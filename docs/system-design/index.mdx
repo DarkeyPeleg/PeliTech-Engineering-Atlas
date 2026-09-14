@@ -1,0 +1,24 @@
+---
+title: 'System Design'
+description: 'How large systems are structured, scaled and kept reliable — from single-server fundamentals through to distributed architecture.'
+category: 'System Design'
+tags:
+  - system-design
+lastUpdated: '2026-09-14'
+toc: false
+---
+
+System design is the practice of deciding how the parts of a system fit together: what runs where,
+how data moves, what happens when a piece fails, and which constraints you are willing to accept in
+exchange for which properties.
+
+The material here works outwards from a single server. **Fundamentals** covers the components
+almost every system is assembled from. **Scalability** deals with handling more load without a
+proportional increase in cost and pain. **Reliability** is about staying correct and available when
+parts of the system misbehave. **Distributed systems** takes on the problems that only appear once
+state is spread across machines that can fail independently and cannot agree instantly.
+
+Two habits run through all of it. First, every technique exists because of a specific problem, and
+knowing the problem matters more than knowing the technique. Second, every technique costs
+something — new failure modes, new operational surface, new ways to be wrong — and an article that
+does not name those costs has not finished explaining the idea.

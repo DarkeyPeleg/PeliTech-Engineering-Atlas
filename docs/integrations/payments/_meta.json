@@ -1,0 +1,5 @@
+{
+  "label": "Payments",
+  "description": "Payment lifecycles, webhooks, idempotency and reconciliation.",
+  "order": 1
+}
