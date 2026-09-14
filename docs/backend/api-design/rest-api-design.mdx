@@ -131,8 +131,8 @@ Use the codes HTTP already defines, and use the specific one rather than a gener
 504 Gateway Timeout       An upstream dependency did not respond in time
 ```
 
-The 4xx/5xx split carries information clients depend on: 4xx means *the caller must change
-something*, 5xx means *the caller may reasonably retry*. Retry middleware, alerting thresholds and
+The 4xx/5xx split carries information clients depend on: 4xx means _the caller must change
+something_, 5xx means _the caller may reasonably retry_. Retry middleware, alerting thresholds and
 error budgets all rely on that distinction, so returning `500` for a validation failure both misleads
 the caller and pollutes your own error rate.
 
@@ -144,8 +144,8 @@ the body is the detail.
 </CommonMistake>
 
 The `401` versus `403` distinction is worth stating precisely, because the names are misleading.
-`401 Unauthorized` actually means *unauthenticated* — we do not know who you are, or your credentials
-have expired. `403 Forbidden` means *we know who you are and you may not do this*. A client can
+`401 Unauthorized` actually means _unauthenticated_ — we do not know who you are, or your credentials
+have expired. `403 Forbidden` means _we know who you are and you may not do this_. A client can
 usefully respond to `401` by refreshing a token; there is nothing useful it can do about a `403`.
 
 ### Error responses
@@ -164,7 +164,11 @@ exactly which fields are at fault.
   "traceId": "01JBQK3M8Z7YV4X2N6P9",
   "errors": [
     { "field": "quantity", "code": "min_value", "detail": "Must be at least 1." },
-    { "field": "currency", "code": "unsupported", "detail": "GBP is not supported for this seller." }
+    {
+      "field": "currency",
+      "code": "unsupported",
+      "detail": "GBP is not supported for this seller."
+    }
   ]
 }
 ```
@@ -176,11 +180,11 @@ clients can localise messages instead of parsing English, and a `traceId` that a
 logs, so a user reporting a problem gives you something you can search for.
 
 <SecurityNote>
-Error messages leak. `Unknown email address` versus `Incorrect password` tells an attacker which
-accounts exist; a stack trace tells them your framework, versions and file layout; a raw database
-error tells them your schema. Return a generic message with a trace ID to the caller and keep the
-detail in your logs. For authentication specifically, use one indistinguishable failure for every
-cause.
+  Error messages leak. `Unknown email address` versus `Incorrect password` tells an attacker which
+  accounts exist; a stack trace tells them your framework, versions and file layout; a raw database
+  error tells them your schema. Return a generic message with a trace ID to the caller and keep the
+  detail in your logs. For authentication specifically, use one indistinguishable failure for every
+  cause.
 </SecurityNote>
 
 ### Pagination
@@ -206,8 +210,8 @@ change, because existing clients are written to expect all the results.
 >
   Offset pagination has two failure modes that get worse with scale. Deep offsets are slow, because
   `OFFSET 100000` requires the database to walk and discard a hundred thousand rows. And the window
-  shifts underneath the caller: if a row is inserted while someone is paging, an item moves from page
-  2 to page 3 and is returned twice, while a deletion causes one to be skipped entirely. Cursor
+  shifts underneath the caller: if a row is inserted while someone is paging, an item moves from
+  page 2 to page 3 and is returned twice, while a deletion causes one to be skipped entirely. Cursor
   pagination avoids both by saying "everything after this exact item" rather than "skip this many".
 </TradeOffs>
 
@@ -269,7 +273,7 @@ export async function createPayment(request: Request): Promise<Response> {
 }
 ```
 
-Two details matter. Reserve the key *before* doing the work, or two simultaneous retries will both
+Two details matter. Reserve the key _before_ doing the work, or two simultaneous retries will both
 find no stored response and both proceed. And store the response, not just the fact of success — the
 retry needs to return the original resource, including its generated ID.
 
@@ -316,8 +320,8 @@ is genuinely safe to remove.
     Wrapped in a transaction where multiple writes must succeed or fail together.
   </Step>
   <Step title="The response states the outcome precisely">
-    `201` with a `Location` header for a creation, `204` for a delete with nothing to say, `409` when
-    the request conflicts with current state.
+    `201` with a `Location` header for a creation, `204` for a delete with nothing to say, `409`
+    when the request conflicts with current state.
   </Step>
 </Steps>
 
@@ -334,7 +338,8 @@ is genuinely safe to remove.
       failure: 'A collection endpoint has no pagination',
       impact:
         'One caller requests a table that has grown to millions of rows and exhausts memory for everyone',
-      mitigation: 'Paginate from day one with a default and a maximum page size, enforced server-side.',
+      mitigation:
+        'Paginate from day one with a default and a maximum page size, enforced server-side.',
     },
     {
       failure: 'Two clients update the same resource concurrently',
@@ -356,8 +361,7 @@ is genuinely safe to remove.
     },
     {
       failure: 'An upstream dependency hangs',
-      impact:
-        'Requests pile up holding connections until the whole service becomes unresponsive',
+      impact: 'Requests pile up holding connections until the whole service becomes unresponsive',
       mitigation:
         'Bounded timeouts on every outbound call, a circuit breaker, and a degraded response rather than an indefinite wait.',
     },
@@ -367,9 +371,9 @@ is genuinely safe to remove.
 ## Scalability considerations
 
 <ScalabilityNote>
-The design choice with the largest effect on load is often cache behaviour. A `GET` that sets
-`Cache-Control` and `ETag` correctly can be served from a CDN or answered with `304 Not Modified`,
-which removes the request from your infrastructure entirely.
+  The design choice with the largest effect on load is often cache behaviour. A `GET` that sets
+  `Cache-Control` and `ETag` correctly can be served from a CDN or answered with `304 Not Modified`,
+  which removes the request from your infrastructure entirely.
 </ScalabilityNote>
 
 Beyond caching, three things matter at scale. **Avoid response shapes that require N+1 queries** —

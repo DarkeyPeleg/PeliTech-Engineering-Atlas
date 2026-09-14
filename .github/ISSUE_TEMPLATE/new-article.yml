@@ -1,0 +1,76 @@
+name: New article
+description: Propose an article, or claim one of the empty sections
+title: 'Article: '
+labels: [content, new-article]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please open this before writing, so effort is not duplicated and the framing can be agreed first.
+        Framing is most of the work on these topics — it is much cheaper to discuss it now than after a
+        draft exists.
+
+  - type: input
+    id: title
+    attributes:
+      label: Proposed title
+      placeholder: Idempotency in Distributed Systems
+    validations:
+      required: true
+
+  - type: input
+    id: path
+    attributes:
+      label: Where it belongs
+      description: The content path. See the taxonomy in docs/.
+      placeholder: system-design/distributed-systems/idempotency
+    validations:
+      required: true
+
+  - type: dropdown
+    id: template
+    attributes:
+      label: Article shape
+      options:
+        - Concept — explains a technique or idea
+        - Comparison — two options head to head
+        - Case study — full system design walkthrough
+        - How it works — end-to-end walkthrough of a flow
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem it addresses
+      description: >
+        What goes wrong without this. The article will open here, so it is the right place to start
+        thinking.
+    validations:
+      required: true
+
+  - type: textarea
+    id: outline
+    attributes:
+      label: Outline
+      description: The sections you intend to write, and what each covers.
+    validations:
+      required: true
+
+  - type: textarea
+    id: value
+    attributes:
+      label: What a reader learns that they would not find elsewhere
+      description: >
+        A specific misconception corrected, a trade-off usually left out, a failure mode rarely
+        discussed. This is the bar for the project.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: writing
+    attributes:
+      label: Are you planning to write it?
+      options:
+        - label: I intend to write this article
+        - label: I am suggesting it for someone else to write

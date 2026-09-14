@@ -14,10 +14,10 @@ relatedTopics:
   - how-things-work/what-happens-when-you-type-a-url
 ---
 
-**Authentication** answers *who are you?* **Authorization** answers *are you allowed to do this?*
+**Authentication** answers _who are you?_ **Authorization** answers _are you allowed to do this?_
 
 They are frequently described as "often confused", which undersells the problem. They are not merely
-confused, they are routinely *collapsed* — and every collapse is a vulnerability, because a system
+confused, they are routinely _collapsed_ — and every collapse is a vulnerability, because a system
 that treats "logged in" as "permitted" grants every user the union of everyone's permissions.
 
 ## Why the distinction is a security boundary
@@ -32,13 +32,13 @@ app.get('/invoices/:id', requireLogin, async (request, response) => {
 });
 ```
 
-`requireLogin` establishes that the caller is a real, logged-in user. It says nothing about *this*
+`requireLogin` establishes that the caller is a real, logged-in user. It says nothing about _this_
 invoice. Any authenticated user can iterate `/invoices/1`, `/invoices/2`, `/invoices/3` and read
 every invoice in the system.
 
 This is **broken object-level authorization**, and it is consistently among the most common serious
 API vulnerabilities found in the wild. It is not an exotic attack. It requires no tooling beyond
-changing a number in a URL, and it happens because the authentication check *looked* like a security
+changing a number in a URL, and it happens because the authentication check _looked_ like a security
 check.
 
 The fix is to authorize the specific object, not merely the caller:
@@ -58,9 +58,9 @@ app.get('/invoices/:id', requireLogin, async (request, response) => {
 ```
 
 <Warning>
-Authentication is a gate at the entrance. Authorization is a check at every door inside. A building
-with one locked front door and no internal locks is not secure just because everyone inside signed
-the visitors' book.
+  Authentication is a gate at the entrance. Authorization is a check at every door inside. A
+  building with one locked front door and no internal locks is not secure just because everyone
+  inside signed the visitors' book.
 </Warning>
 
 ## The two problems compared
@@ -75,27 +75,45 @@ the visitors' book.
     },
     {
       aspect: 'Runs',
-      values: ['Once per session or token issuance', 'On every request, for every resource touched'],
+      values: [
+        'Once per session or token issuance',
+        'On every request, for every resource touched',
+      ],
     },
     {
       aspect: 'Depends on',
-      values: ['Credentials: password, passkey, token, certificate', 'Identity, roles, attributes, resource ownership, current state'],
+      values: [
+        'Credentials: password, passkey, token, certificate',
+        'Identity, roles, attributes, resource ownership, current state',
+      ],
     },
     {
       aspect: 'Typical answer',
-      values: ['A verified identity, plus a token representing it', 'A yes or no decision, per action and object'],
+      values: [
+        'A verified identity, plus a token representing it',
+        'A yes or no decision, per action and object',
+      ],
     },
     {
       aspect: 'Failure status code',
-      values: ['401 — credentials missing, invalid or expired', '403 — identity known, action not permitted'],
+      values: [
+        '401 — credentials missing, invalid or expired',
+        '403 — identity known, action not permitted',
+      ],
     },
     {
       aspect: 'Changes',
-      values: ['Rarely — when a user logs in or their credentials change', 'Constantly — roles, sharing, ownership, subscription state'],
+      values: [
+        'Rarely — when a user logs in or their credentials change',
+        'Constantly — roles, sharing, ownership, subscription state',
+      ],
     },
     {
       aspect: 'Consequence of getting it wrong',
-      values: ['Impersonation: an attacker becomes someone else', 'Privilege escalation: a real user does what they should not'],
+      values: [
+        'Impersonation: an attacker becomes someone else',
+        'Privilege escalation: a real user does what they should not',
+      ],
     },
   ]}
 />
@@ -143,10 +161,10 @@ export async function verifyPassword(stored: string, supplied: string): Promise<
 ```
 
 <SecurityNote>
-Login must fail identically whether the account does not exist or the password is wrong — same
-message, same status, and comparable timing. Distinguishing them turns your login form into an
-account-enumeration oracle. That means verifying against a dummy hash when no user is found, so the
-"no such user" path costs about the same as the real one.
+  Login must fail identically whether the account does not exist or the password is wrong — same
+  message, same status, and comparable timing. Distinguishing them turns your login form into an
+  account-enumeration oracle. That means verifying against a dummy hash when no user is found, so
+  the "no such user" path costs about the same as the real one.
 </SecurityNote>
 
 ### Sessions and tokens
@@ -172,16 +190,16 @@ state lives.
   ]}
 >
   The decision hinges on revocation. A stateless token cannot be withdrawn — if a user is banned or
-  logs out, their token keeps working until it expires. The standard mitigation is short-lived access
-  tokens (minutes) paired with a long-lived refresh token that *is* stored and revocable, which is a
-  reasonable compromise but note what it means: you have reintroduced server-side state, just at a
-  lower frequency.
+  logs out, their token keeps working until it expires. The standard mitigation is short-lived
+  access tokens (minutes) paired with a long-lived refresh token that *is* stored and revocable,
+  which is a reasonable compromise but note what it means: you have reintroduced server-side state,
+  just at a lower frequency.
 </TradeOffs>
 
 <CommonMistake>
-Putting permissions in a JWT and treating them as current. A token issued when a user was an admin
-still says `role: admin` after their access is removed, for as long as it remains valid. Claims record
-what was true at issuance. Authorization decisions need what is true now.
+  Putting permissions in a JWT and treating them as current. A token issued when a user was an admin
+  still says `role: admin` after their access is removed, for as long as it remains valid. Claims
+  record what was true at issuance. Authorization decisions need what is true now.
 </CommonMistake>
 
 If you do use JWTs, a few specifics matter: verify the signature with an explicit expected algorithm
@@ -200,8 +218,8 @@ audit, and it strains when permissions depend on the relationship between the us
 which is why so many RBAC systems accumulate roles like `regional_manager_emea_readonly`.
 
 **Attribute-based (ABAC)** decides from attributes of the user, the resource, the action and the
-environment: *a manager may approve an expense if it is under £5,000, belongs to their department, and
-is in `pending` state*. Far more expressive, correspondingly harder to audit — answering "who can
+environment: _a manager may approve an expense if it is under £5,000, belongs to their department, and
+is in `pending` state_. Far more expressive, correspondingly harder to audit — answering "who can
 approve this?" now requires evaluating rules rather than reading a list.
 
 **Relationship-based (ReBAC)** decides from a graph of relationships: you may read a document if you
@@ -307,14 +325,17 @@ because it depends on data that must be read first.
     },
     {
       failure: 'Session identifier not rotated after login',
-      impact: 'Session fixation — an attacker who planted a session ID inherits the authenticated session',
-      mitigation: 'Issue a fresh session identifier on every privilege change, and invalidate the old one.',
+      impact:
+        'Session fixation — an attacker who planted a session ID inherits the authenticated session',
+      mitigation:
+        'Issue a fresh session identifier on every privilege change, and invalidate the old one.',
     },
     {
       failure: 'Mass assignment on update',
       impact:
-        "A user submits {\"role\": \"admin\"} to a profile endpoint that forwards the whole body to the database",
-      mitigation: 'Allowlist updatable fields explicitly; never spread request bodies into a record.',
+        'A user submits {"role": "admin"} to a profile endpoint that forwards the whole body to the database',
+      mitigation:
+        'Allowlist updatable fields explicitly; never spread request bodies into a record.',
     },
     {
       failure: 'No rate limiting on authentication',
@@ -329,9 +350,9 @@ because it depends on data that must be read first.
 
 The HTTP status codes preserve this distinction, and the names are actively misleading:
 
-- **`401 Unauthorized`** means *unauthenticated*. We do not know who you are, or your credentials
+- **`401 Unauthorized`** means _unauthenticated_. We do not know who you are, or your credentials
   have expired. A client can act on this by re-authenticating.
-- **`403 Forbidden`** means *unauthorized*. We know exactly who you are and you may not do this.
+- **`403 Forbidden`** means _unauthorized_. We know exactly who you are and you may not do this.
   Re-authenticating will not help.
 
 Where the existence of a resource is itself sensitive, prefer `404` over `403` — a `403` confirms

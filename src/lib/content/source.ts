@@ -14,7 +14,13 @@ import {
   hrefFromSlug,
   normalizeSlug,
 } from './paths';
-import { dirMetaSchema, formatZodError, frontmatterSchema, type DirMeta, type DocFrontmatter } from './schema';
+import {
+  dirMetaSchema,
+  formatZodError,
+  frontmatterSchema,
+  type DirMeta,
+  type DocFrontmatter,
+} from './schema';
 import { estimateReadingTime } from './reading-time';
 import { extractToc, type TocEntry } from './toc';
 
@@ -124,7 +130,10 @@ async function readDoc(absolutePath: string, relativePath: string): Promise<DocE
 
   const segments = segmentsFromRelativePath(relativePath);
   if (segments.length === 0) {
-    throw new ContentError(relativePath, 'a root-level index file has no route; move it into a section');
+    throw new ContentError(
+      relativePath,
+      'a root-level index file has no route; move it into a section',
+    );
   }
 
   const fileName = path.basename(relativePath);
@@ -166,7 +175,9 @@ async function walk(
     const meta = await readDirMeta(dirPath, relativePath);
     const dirName = path.basename(relativePath);
     const { order, name } = parseNumericPrefix(dirName);
-    const segments = relativePath.split(path.sep).map((part) => parseNumericPrefix(part).name.toLowerCase());
+    const segments = relativePath
+      .split(path.sep)
+      .map((part) => parseNumericPrefix(part).name.toLowerCase());
 
     accumulator.dirs.push({
       slug: segments.join('/'),
@@ -265,9 +276,7 @@ export async function getDirBySlug(slug: string): Promise<DirEntry | undefined> 
 /** Top-level knowledge areas, in `_meta.json` order. */
 export async function getSections(): Promise<DirEntry[]> {
   const { dirs } = await getContentIndex();
-  return dirs
-    .filter((dir) => dir.segments.length === 1)
-    .sort(compareByOrderThenLabel);
+  return dirs.filter((dir) => dir.segments.length === 1).sort(compareByOrderThenLabel);
 }
 
 export function compareByOrderThenLabel(

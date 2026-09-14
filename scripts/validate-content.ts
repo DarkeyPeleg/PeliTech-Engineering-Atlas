@@ -59,7 +59,10 @@ async function checkContent(): Promise<void> {
       warn(file, `description is only ${doc.frontmatter.description.length} characters`);
     }
     if (doc.frontmatter.title.length > 70) {
-      warn(file, `title is ${doc.frontmatter.title.length} characters; may be truncated in search results`);
+      warn(
+        file,
+        `title is ${doc.frontmatter.title.length} characters; may be truncated in search results`,
+      );
     }
 
     // Related topics must resolve, or a rename leaves dangling links.
@@ -100,7 +103,12 @@ async function checkContent(): Promise<void> {
     }
 
     // A heading structure is what makes the table of contents useful.
-    if (doc.frontmatter.toc && !doc.isSectionIndex && doc.toc.length === 0 && doc.body.length > 2000) {
+    if (
+      doc.frontmatter.toc &&
+      !doc.isSectionIndex &&
+      doc.toc.length === 0 &&
+      doc.body.length > 2000
+    ) {
       warn(file, 'long article has no "##" headings, so it gets no table of contents');
     }
   }

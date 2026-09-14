@@ -109,7 +109,7 @@ Two details matter more than they appear to:
 The check must reflect what the instance actually needs to serve requests. An endpoint that returns
 `200 OK` from the web framework without touching the database will happily report health while
 every real request fails on a dead connection pool. The opposite mistake is just as bad: a health
-check that queries the database means a brief database problem marks *every* instance unhealthy at
+check that queries the database means a brief database problem marks _every_ instance unhealthy at
 once, and the balancer takes the entire pool out of rotation, converting a slow database into a
 total outage.
 
@@ -118,9 +118,9 @@ over a transient blip. Removing after one failed check is twitchy; removing afte
 a 10-second interval means nearly two minutes of errors.
 
 <Tip>
-A useful split is a shallow liveness endpoint for the balancer (is this process able to respond at
-all?) and a deeper readiness endpoint checked less aggressively, with dependency failures handled
-as degraded responses rather than as instance death.
+  A useful split is a shallow liveness endpoint for the balancer (is this process able to respond at
+  all?) and a deeper readiness endpoint checked less aggressively, with dependency failures handled
+  as degraded responses rather than as instance death.
 </Tip>
 
 ### Session affinity
@@ -220,8 +220,8 @@ keys in its arc.
   </Step>
   <Step title="The connection is established">
     For a layer 7 HTTPS balancer, the TLS handshake terminates *at the balancer*. It holds the
-    certificate and the private key, and application instances typically receive plain HTTP over
-    the private network, or a separately encrypted connection.
+    certificate and the private key, and application instances typically receive plain HTTP over the
+    private network, or a separately encrypted connection.
   </Step>
   <Step title="The balancer selects an instance">
     From the pool of instances currently marked healthy, using the configured algorithm. Unhealthy
@@ -229,9 +229,9 @@ keys in its arc.
   </Step>
   <Step title="The request is forwarded">
     Usually over a pooled, keep-alive connection to avoid a fresh TCP and TLS handshake per request.
-    The balancer adds forwarding headers — `X-Forwarded-For` with the client IP,
-    `X-Forwarded-Proto` with the original scheme — because the instance now sees the balancer as its
-    peer, not the client.
+    The balancer adds forwarding headers — `X-Forwarded-For` with the client IP, `X-Forwarded-Proto`
+    with the original scheme — because the instance now sees the balancer as its peer, not the
+    client.
   </Step>
   <Step title="The response returns through the balancer">
     Which is where response compression, header manipulation and access logging happen.
@@ -335,9 +335,9 @@ process.on('SIGTERM', () => {
 ```
 
 <CommonMistake>
-Exiting immediately on `SIGTERM`. The balancer has not yet noticed the instance is going away, so
-it keeps forwarding requests to a socket that is closing, and users see errors during every deploy.
-Fail the readiness check first, wait longer than one health-check interval, then close.
+  Exiting immediately on `SIGTERM`. The balancer has not yet noticed the instance is going away, so
+  it keeps forwarding requests to a socket that is closing, and users see errors during every
+  deploy. Fail the readiness check first, wait longer than one health-check interval, then close.
 </CommonMistake>
 
 ## Trade-offs
@@ -416,9 +416,9 @@ Fail the readiness check first, wait longer than one health-check interval, then
 ## Security considerations
 
 <SecurityNote>
-The balancer terminates TLS, which means it holds your private keys and is the natural enforcement
-point for transport security. It is also the boundary where client-supplied information stops being
-trustworthy.
+  The balancer terminates TLS, which means it holds your private keys and is the natural enforcement
+  point for transport security. It is also the boundary where client-supplied information stops
+  being trustworthy.
 </SecurityNote>
 
 - **Never trust forwarding headers from outside.** `X-Forwarded-For` is a client-settable header.
@@ -439,9 +439,9 @@ trustworthy.
 ## Scalability considerations
 
 <ScalabilityNote>
-A load balancer removes the application tier as the bottleneck, which usually just relocates the
-bottleneck. Expect the next constraint to be the database, a shared cache, or the balancer's own
-connection capacity.
+  A load balancer removes the application tier as the bottleneck, which usually just relocates the
+  bottleneck. Expect the next constraint to be the database, a shared cache, or the balancer's own
+  connection capacity.
 </ScalabilityNote>
 
 Beyond a single balancer, capacity is added in layers. **DNS-level distribution** returns different

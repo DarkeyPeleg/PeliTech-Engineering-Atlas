@@ -1,0 +1,58 @@
+name: Content correction
+description: Report a factual error, an outdated claim, or a confusing explanation
+title: 'Correction: '
+labels: [content, correction]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Corrections are the most valuable contribution to this project. If the fix is obvious, a pull
+        request is welcome instead of an issue — no discussion needed.
+
+  - type: input
+    id: page
+    attributes:
+      label: Page
+      description: The URL or file path
+      placeholder: /databases/indexing/database-indexing
+    validations:
+      required: true
+
+  - type: textarea
+    id: claim
+    attributes:
+      label: What the article currently says
+      description: Quote the passage, so it can be found after later edits.
+    validations:
+      required: true
+
+  - type: textarea
+    id: correction
+    attributes:
+      label: What it should say, and why
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: >
+        Documentation, a specification, a version number, a benchmark, or a reproduction. Claims about
+        what a system does are much easier to act on when they can be checked.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind of problem
+      options:
+        - Factually incorrect
+        - Correct once, now outdated
+        - Technically correct but misleading
+        - Confusing or unclear
+        - Broken link or diagram
+        - Code example does not work
+    validations:
+      required: true

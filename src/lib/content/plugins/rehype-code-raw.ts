@@ -37,7 +37,8 @@ export function rehypeCodeRaw() {
           child.type === 'element' && child.properties?.['dataLine'] !== undefined,
       );
 
-      const raw = lines.length > 0 ? lines.map((line) => textContent(line)).join('\n') : textContent(code);
+      const raw =
+        lines.length > 0 ? lines.map((line) => textContent(line)).join('\n') : textContent(code);
 
       node.properties = { ...node.properties, 'data-raw': raw };
     });

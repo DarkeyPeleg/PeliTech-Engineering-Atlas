@@ -38,7 +38,11 @@ export function estimateReadingTime(markdown: string): number {
 
     if (fenceMarker !== null) {
       // A closing fence must be at least as long as the opening one.
-      if (fence?.[1] && fence[1].startsWith(fenceMarker[0]!) && fence[1].length >= fenceMarker.length) {
+      if (
+        fence?.[1] &&
+        fence[1].startsWith(fenceMarker[0]!) &&
+        fence[1].length >= fenceMarker.length
+      ) {
         fenceMarker = null;
         inDiagram = false;
         continue;

@@ -1,0 +1,354 @@
+---
+title: 'What Happens When You Type a URL?'
+description: 'The complete path from keystroke to rendered page — DNS resolution, TCP and TLS handshakes, HTTP, server-side routing, and how the browser turns bytes into pixels.'
+category: 'How Things Work'
+tags:
+  - networking
+  - dns
+  - http
+  - tls
+  - browsers
+difficulty: 'Beginner'
+lastUpdated: '2026-09-14'
+relatedTopics:
+  - system-design/scalability/load-balancing
+  - backend/api-design/rest-api-design
+---
+
+Typing a URL and pressing Enter starts a chain of perhaps a dozen distinct systems, most of which can
+fail independently. Following it once, properly, changes how you debug: "the site is slow" becomes a
+question with roughly eight candidate answers, each of which can be measured.
+
+This traces `https://example.com/dashboard` from keystroke to painted pixels.
+
+```mermaid caption="The end-to-end path. Every arrow is a place latency can accumulate and a place things can fail."
+sequenceDiagram
+    participant User
+    participant Browser
+    participant Resolver as DNS resolver
+    participant LB as Load balancer
+    participant Server as App server
+    participant DB as Database
+
+    User->>Browser: Enter URL
+    Browser->>Browser: Parse URL, check caches, HSTS
+    Browser->>Resolver: Where is example.com?
+    Resolver-->>Browser: 93.184.216.34
+    Browser->>LB: TCP handshake (SYN, SYN-ACK, ACK)
+    Browser->>LB: TLS handshake (ClientHello ... Finished)
+    LB-->>Browser: Encrypted channel established
+    Browser->>LB: GET /dashboard
+    LB->>Server: Forward to a healthy instance
+    Server->>DB: Query
+    DB-->>Server: Rows
+    Server-->>LB: 200 OK + HTML
+    LB-->>Browser: 200 OK + HTML
+    Browser->>Browser: Parse HTML, request subresources
+    Browser->>Browser: Build DOM + CSSOM, layout, paint
+    Browser-->>User: Page appears
+```
+
+## 1. The browser processes what you typed
+
+Before any network activity, the browser has to work out what you meant.
+
+It first decides whether the input is a **URL or a search query**. `example.com/dashboard` is treated
+as a URL; `example dashboard` goes to your search engine. This is why a typo in a domain sometimes
+produces search results instead of an error.
+
+Then it **parses the URL** into components: scheme (`https`), host (`example.com`), port (implicitly
+443), path (`/dashboard`), plus any query string and fragment. The fragment (`#section`) is worth
+noting because it is never sent to the server — it is purely a client-side instruction.
+
+Next it checks the **HSTS list**. If the site has previously sent a `Strict-Transport-Security`
+header, or is in the browser's preloaded list, the browser upgrades `http://` to `https://` before
+sending anything. This closes a real attack window: without HSTS, an initial plaintext request can be
+intercepted and redirected.
+
+Finally, the browser checks whether it needs to make the request at all. A fresh entry in the **HTTP
+cache** can satisfy the request immediately, and a registered **service worker** can intercept it and
+respond from local storage. A page loading instantly on a second visit usually never touched the
+network.
+
+## 2. DNS resolution turns a name into an address
+
+Networks route to IP addresses, so `example.com` must be resolved. The browser checks a cascade of
+caches before asking anyone:
+
+<Steps>
+  <Step title="Browser cache">
+    Browsers keep their own short-lived DNS cache, typically for a minute or so.
+  </Step>
+  <Step title="Operating system cache and hosts file">
+    The OS resolver has its own cache. It also consults `/etc/hosts` (or the Windows equivalent),
+    which is why an entry there overrides real DNS entirely — useful for local development, and a
+    frequent cause of "it works on my machine".
+  </Step>
+  <Step title="Recursive resolver">
+    Otherwise the query goes to a configured resolver — your ISP's, or a public one like `1.1.1.1`.
+    This resolver does the actual work and caches the result for everyone using it.
+  </Step>
+  <Step title="Root and TLD servers">
+    If the resolver has nothing cached, it asks a root server, which points it at the `.com`
+    nameservers, which point it at `example.com`'s authoritative nameservers.
+  </Step>
+  <Step title="Authoritative nameserver">
+    Returns the actual record: an `A` record for IPv4 or `AAAA` for IPv6, along with a TTL that
+    tells every cache along the way how long it may keep the answer.
+  </Step>
+</Steps>
+
+DNS is where two operationally important behaviours originate. **TTL governs how fast changes
+propagate** — a record with a 24-hour TTL means some clients keep using the old address for a day
+after you change it, which is why TTLs are lowered _before_ a planned migration, not during it. And
+**one name can return several addresses**, which is the basis of DNS-level load distribution and
+geographic routing: the resolver's own location influences which addresses it is given.
+
+<Note>
+  Classic DNS runs over UDP in plaintext, meaning anyone on the path can see which sites you are
+  resolving. DNS over HTTPS (DoH) and DNS over TLS (DoT) encrypt this, which is why the browser may
+  be resolving names over HTTPS to a resolver of its own choosing rather than using the OS resolver
+  at all.
+</Note>
+
+## 3. TCP establishes a connection
+
+With an IP address, the browser opens a TCP connection to port 443 via the **three-way handshake**:
+the client sends `SYN`, the server replies `SYN-ACK`, the client replies `ACK`. Both sides now agree
+they can reach each other and have exchanged initial sequence numbers.
+
+The cost is one full round trip before any application data can be sent. On a 20ms link that is 20ms;
+on a 300ms satellite or congested mobile link it is 300ms — which is why connection reuse matters so
+much, and why HTTP keep-alive and connection pooling are not micro-optimisations.
+
+TCP also provides the guarantees the layers above assume: bytes arrive in order, lost segments are
+retransmitted, and sending rate adapts to congestion. That last property is why a lossy connection is
+slow rather than merely unreliable: TCP interprets loss as congestion and reduces its sending rate.
+
+## 4. TLS negotiates encryption and identity
+
+HTTPS means the TCP connection is wrapped in TLS, which does three things: it establishes an encrypted
+channel, it proves the server is who it claims to be, and it detects tampering.
+
+The TLS 1.3 handshake, simplified:
+
+<Steps>
+  <Step title="ClientHello">
+    The client offers supported cipher suites and includes a key share for key exchange. It also
+    sends **SNI** — the hostname it wants — in the clear, which is how one IP address can host many
+    HTTPS sites, and also how a network observer knows which site you are visiting even over HTTPS.
+  </Step>
+  <Step title="ServerHello and certificate">
+    The server picks a cipher suite, sends its own key share, and presents its certificate chain.
+  </Step>
+  <Step title="The client validates the certificate">
+    This is the step that makes HTTPS meaningful. The browser checks that the certificate covers the
+    requested hostname, that it has not expired, that it chains to a trusted root certificate
+    authority, and that it has not been revoked. Any failure produces the interstitial warning.
+  </Step>
+  <Step title="Both sides derive session keys">
+    From the exchanged key shares, using Diffie-Hellman — so the keys are never transmitted and
+    cannot be recovered from a recorded session later, a property called forward secrecy.
+  </Step>
+  <Step title="Finished">Both sides confirm the handshake, and application data can flow.</Step>
+</Steps>
+
+TLS 1.3 completes this in one round trip, where TLS 1.2 needed two — a meaningful difference on
+high-latency connections. Note where this terminates: for a site behind a load balancer or CDN, the
+handshake completes _there_, not at the application server, which is why that component holds the
+certificate and private key.
+
+## 5. The HTTP request is sent
+
+Over the encrypted connection, the browser sends the request:
+
+```http
+GET /dashboard HTTP/2
+Host: example.com
+User-Agent: Mozilla/5.0 ...
+Accept: text/html,application/xhtml+xml,*/*;q=0.8
+Accept-Encoding: gzip, deflate, br
+Accept-Language: en-GB,en;q=0.9
+Cookie: session=abc123
+```
+
+Several of these headers do real work. `Host` allows one server to serve multiple domains.
+`Accept-Encoding` advertises which compression the client understands, which is why responses come
+back gzipped or Brotli-compressed. `Cookie` carries the session identifier, which is how the server
+knows this request belongs to a logged-in user. And `Accept-Language` is what content negotiation
+uses to decide which language to serve.
+
+If the negotiated protocol is HTTP/2 or HTTP/3, headers are compressed and many requests share a
+single connection concurrently, removing the head-of-line blocking that made HTTP/1.1 require six
+parallel connections per host.
+
+## 6. The server produces a response
+
+The request usually arrives first at a **load balancer**, which terminates TLS, picks a healthy
+application instance, and forwards the request with `X-Forwarded-For` so the instance can still see
+the client's address.
+
+Inside the application, roughly this happens:
+
+<Steps>
+  <Step title="Routing">The path `/dashboard` is matched to a handler.</Step>
+  <Step title="Middleware">
+    Cookie parsing, session lookup, authentication, rate limiting, logging.
+  </Step>
+  <Step title="Authorization">
+    Establishing not just who the caller is, but that they may view this particular dashboard.
+  </Step>
+  <Step title="Data access">
+    Queries against a database, and reads from a cache where possible. This is where most
+    server-side time is usually spent, and where an N+1 query pattern quietly turns one page into
+    two hundred round trips.
+  </Step>
+  <Step title="Rendering">
+    HTML is produced server-side, or a shell is returned for the client to fill in.
+  </Step>
+  <Step title="Response">
+    A status code, headers including `Content-Type`, `Cache-Control` and `Set-Cookie`, then the
+    body.
+  </Step>
+</Steps>
+
+## 7. The browser renders the page
+
+Receiving HTML is the beginning of the second half, not the end.
+
+The browser **parses HTML into the DOM**, incrementally, as bytes arrive. When it encounters a
+subresource it may need — a stylesheet, a script, an image — it issues another request. This is the
+critical detail behind most front-end performance work: the HTML is a _description_ of what else must
+be fetched, so a page is not one request but dozens.
+
+Two blocking behaviours matter. **CSS blocks rendering**, because the browser cannot lay anything out
+before it knows the styles — an unstyled flash is worse than a brief delay. **Scripts block parsing**
+by default, because a script can modify the document; `defer` and `async` exist to release that
+constraint.
+
+CSS is parsed into the **CSSOM**, then combined with the DOM into a **render tree** of everything
+visible. **Layout** computes the exact geometry of every box. **Paint** produces the pixels, and
+**compositing** assembles layers, potentially on the GPU. Finally, JavaScript runs, hydrates
+interactive components, and may fetch more data — which is why a page can appear complete a noticeable
+moment before it responds to clicks.
+
+## Where the time actually goes
+
+<ComparisonTable
+  options={['Typical cost', 'How to reduce it']}
+  aspectLabel="Stage"
+  rows={[
+    {
+      aspect: 'DNS resolution',
+      values: [
+        '0ms cached, 20–120ms cold',
+        'Sensible TTLs, a fast DNS provider, dns-prefetch for known third parties',
+      ],
+    },
+    {
+      aspect: 'TCP handshake',
+      values: ['1 round trip', 'Keep-alive, connection pooling, HTTP/2 or HTTP/3'],
+    },
+    {
+      aspect: 'TLS handshake',
+      values: [
+        '1 round trip on TLS 1.3',
+        'TLS 1.3, session resumption, terminate close to the user via a CDN',
+      ],
+    },
+    {
+      aspect: 'Server processing',
+      values: [
+        '1ms to several seconds',
+        'Indexes, caching, eliminating N+1 queries, moving slow work to background jobs',
+      ],
+    },
+    {
+      aspect: 'Response transfer',
+      values: [
+        'Proportional to payload and bandwidth',
+        'Compression, smaller payloads, a CDN edge nearer the user',
+      ],
+    },
+    {
+      aspect: 'Subresource loading',
+      values: [
+        'Often the dominant cost',
+        'Fewer and smaller assets, preload critical ones, defer the rest',
+      ],
+    },
+    {
+      aspect: 'Parse, layout, paint',
+      values: [
+        '10ms to seconds on slow devices',
+        'Less JavaScript, avoid layout thrashing, reserve space for images',
+      ],
+    },
+  ]}
+/>
+
+The pattern worth internalising: on a fast connection to a well-built site, the network stages are a
+small fraction of the total and JavaScript execution dominates. On a slow mobile connection, the round
+trips dominate — and each stage above costs at least one. This is why reducing the _number_ of
+sequential round trips is usually more valuable than shaving milliseconds off any single one.
+
+## When it goes wrong
+
+<FailureScenarios
+  scenarios={[
+    {
+      failure: 'DNS does not resolve',
+      impact: 'The browser reports the site cannot be found; nothing else is attempted',
+      mitigation:
+        'Multiple nameservers with a provider that has independent infrastructure; monitor resolution externally.',
+    },
+    {
+      failure: 'TCP connection refused or times out',
+      impact: 'The address resolves but nothing is listening, or a firewall is dropping packets',
+      mitigation:
+        'Health checks on the listening port, redundant balancers, and alerting on reachability.',
+    },
+    {
+      failure: 'Certificate expired',
+      impact:
+        'Every visitor gets a full-page security warning — effectively a total outage, and a common one',
+      mitigation: 'Automated renewal via ACME, plus independent monitoring of the expiry date.',
+    },
+    {
+      failure: 'Certificate hostname mismatch',
+      impact: 'The same interstitial warning, typically after adding a subdomain',
+      mitigation: 'Ensure the certificate covers every hostname served, including apex and www.',
+    },
+    {
+      failure: 'Server returns 502 or 504',
+      impact: 'The balancer is reachable but no healthy instance answered in time',
+      mitigation:
+        'Fix upstream capacity or timeouts; ensure health checks reflect real serving ability.',
+    },
+    {
+      failure: 'A render-blocking script is slow',
+      impact: 'A blank page long after the HTML arrived — the network was never the problem',
+      mitigation:
+        'Defer non-critical scripts, inline critical CSS, and measure with real-user timings.',
+    },
+    {
+      failure: 'Stale cache after a deploy',
+      impact:
+        'Users receive old JavaScript against a new API and see errors that do not reproduce locally',
+      mitigation:
+        'Content-hashed filenames with long-lived caching, and a short-lived HTML document.',
+    },
+  ]}
+/>
+
+<KeyTakeaways
+  points={[
+    'A URL becomes a page through roughly seven stages, each independently able to fail or be slow.',
+    'DNS is a cascade of caches; TTL decides how long a change takes to take effect everywhere.',
+    'TCP costs one round trip and TLS one more, which is why connection reuse matters on slow links.',
+    'Certificate validation is what makes HTTPS meaningful — and expiry is a common self-inflicted outage.',
+    'HTML is a description of further work; most pages are dozens of requests, not one.',
+    'CSS blocks rendering and scripts block parsing, which is where perceived slowness usually originates.',
+    'Reducing the number of sequential round trips beats optimising any single stage.',
+  ]}
+/>

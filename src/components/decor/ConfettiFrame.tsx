@@ -121,11 +121,7 @@ export function ConfettiFrame({ hideOnSmall = true, className }: ConfettiFramePr
       )}
     >
       {[...leftShards, ...rightShards].map((shard, index) => (
-        <span
-          key={index}
-          className={cn('absolute block', shard.className)}
-          style={shard.style}
-        />
+        <span key={index} className={cn('absolute block', shard.className)} style={shard.style} />
       ))}
     </div>
   );

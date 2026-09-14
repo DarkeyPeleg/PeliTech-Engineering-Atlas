@@ -76,7 +76,10 @@ async function main(): Promise<void> {
 
   const checks: [string, boolean][] = [
     ['heading ids are generated', html.includes('id="heading-with-anchor"')],
-    ['heading permalinks are added and labelled', html.includes('aria-label="Permalink to this section"')],
+    [
+      'heading permalinks are added and labelled',
+      html.includes('aria-label="Permalink to this section"'),
+    ],
     ['GFM tables render', html.includes('<table>')],
     ['mermaid fences become components', html.includes('data-mermaid="true"')],
     ['mermaid captions pass through', html.includes('data-caption="A sequence"')],

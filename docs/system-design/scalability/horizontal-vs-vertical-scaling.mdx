@@ -1,0 +1,319 @@
+---
+title: 'Horizontal vs Vertical Scaling'
+description: 'Adding capacity by making a machine bigger or by adding more machines — what each costs, where each stops working, and why statelessness decides which is available to you.'
+category: 'System Design'
+tags:
+  - scalability
+  - architecture
+  - system-design
+  - high-availability
+difficulty: 'Beginner'
+lastUpdated: '2026-09-14'
+relatedTopics:
+  - system-design/scalability/load-balancing
+  - decisions/monolith-vs-microservices
+---
+
+**Vertical scaling** (scaling up) means giving a machine more resources: more CPU cores, more memory,
+faster storage. **Horizontal scaling** (scaling out) means adding more machines and distributing work
+across them.
+
+The usual framing is that vertical scaling is the naive option and horizontal is the grown-up one.
+That is wrong in a way that costs teams real money and time: vertical scaling is frequently the correct
+answer, modern hardware is far larger than most people assume, and horizontal scaling introduces
+problems that do not exist on one machine.
+
+## The two approaches
+
+```mermaid caption="Vertical scaling replaces one machine with a larger one. Horizontal scaling adds machines and requires something to distribute work between them."
+flowchart LR
+    subgraph v [Vertical: one bigger machine]
+        direction TB
+        S1["4 vCPU<br/>16 GB"] -->|"replace"| S2["32 vCPU<br/>128 GB"]
+    end
+    subgraph h [Horizontal: more machines]
+        direction TB
+        LB[Load balancer] --> A["4 vCPU<br/>16 GB"]
+        LB --> B["4 vCPU<br/>16 GB"]
+        LB --> C["4 vCPU<br/>16 GB"]
+    end
+    class S1 service
+    class S2 highlight
+    class LB service
+    class A service
+    class B service
+    class C service
+```
+
+<ComparisonTable
+  options={['Vertical (scale up)', 'Horizontal (scale out)']}
+  aspectLabel="Aspect"
+  rows={[
+    {
+      aspect: 'What changes',
+      values: [
+        'One machine gets more resources.',
+        'More machines are added; each stays the same size.',
+      ],
+    },
+    {
+      aspect: 'Application changes needed',
+      values: [
+        'Usually none.',
+        'Statelessness, shared session store, distributed locking, cache coherence.',
+      ],
+    },
+    {
+      aspect: 'Ceiling',
+      values: [
+        'Hard — bounded by the largest available machine.',
+        'Effectively none for stateless tiers; bounded by coordination for stateful ones.',
+      ],
+    },
+    {
+      aspect: 'Effect on availability',
+      values: [
+        'None. Still one machine, still one point of failure.',
+        'Improves it — the pool absorbs the loss of an instance.',
+      ],
+    },
+    {
+      aspect: 'Downtime to apply',
+      values: ['Usually a restart or failover.', 'None — add instances while running.'],
+    },
+    {
+      aspect: 'Granularity',
+      values: ['Coarse: instance sizes roughly double.', 'Fine: add one instance at a time.'],
+    },
+    {
+      aspect: 'Cost curve',
+      values: [
+        'Superlinear at the top end — the largest instances cost far more per unit of capacity.',
+        'Roughly linear, plus the cost of the balancer and coordination.',
+      ],
+    },
+    {
+      aspect: 'Operational complexity',
+      values: [
+        'Low. One machine to configure, monitor and debug.',
+        'Higher: orchestration, service discovery, distributed debugging.',
+      ],
+    },
+    {
+      aspect: 'Failure mode',
+      values: [
+        'Total — the machine is the service.',
+        'Partial and survivable, if the application tolerates instance loss.',
+      ],
+    },
+  ]}
+/>
+
+## Why vertical scaling is underrated
+
+Two facts change the calculation.
+
+**Machines are enormous.** A single cloud instance can be had with hundreds of vCPUs and multiple
+terabytes of memory. A well-indexed PostgreSQL instance on serious hardware handles workloads that most
+teams assume require a distributed database. The mental model of a "server" as a 4-core, 16GB box is a
+decade out of date, and a great deal of premature distribution follows from it.
+
+**Distribution has a floor cost you pay immediately.** Going from one machine to three does not merely
+add machines. It adds a load balancer, session state that must move out of process, cache invalidation
+across instances, log aggregation, distributed tracing to make debugging possible again, and a class of
+bug that only appears when two requests are handled by different instances. That cost is paid on day
+one, whether or not you ever need the capacity.
+
+<Tip>
+  The cheapest scaling work is usually not scaling at all. A missing index, an N+1 query, or an
+  absent cache commonly accounts for a factor of ten or more — far more than doubling your instance
+  count, at a fraction of the cost. Profile before provisioning.
+</Tip>
+
+## Where vertical scaling stops
+
+It stops for three reasons, and only one of them is about capacity.
+
+**The ceiling is real.** However large instances get, there is a largest one. Approaching it means the
+next increment of growth has no answer, which is a bad position to discover under load.
+
+**The cost curve turns.** Pricing is roughly linear through the middle of the range and superlinear at
+the top. The largest instances cost disproportionately more per unit of capacity, so at some point three
+medium machines are cheaper than one large one.
+
+**It does nothing for availability.** This is the argument that actually decides it for most production
+systems. A bigger machine is still one machine. It has one power supply, one operating system, one
+kernel to panic, and it lives in one availability zone. No amount of vertical scaling gets you past
+"this service is down when this machine is down", and a deploy still means a restart.
+
+That last point is why the decision is frequently not about load at all. Teams move to two instances
+behind a balancer at very modest traffic, because they want zero-downtime deploys and survivable
+hardware failure.
+
+## What horizontal scaling requires
+
+Horizontal scaling is only available if instances are interchangeable. Making them so is the actual
+work, and it comes down to removing local state.
+
+### Session state
+
+```typescript title="sessions.ts"
+/*
+ * Local, in-memory sessions: correct on one instance, broken on several. A user's
+ * next request may land on an instance that has never heard of them.
+ */
+const sessions = new Map<string, Session>();
+
+/*
+ * Shared session store: any instance can serve any request, and losing an
+ * instance does not log anyone out. This single change is usually the largest
+ * step towards being horizontally scalable.
+ */
+export async function getSession(sessionId: string): Promise<Session | null> {
+  const raw = await redis.get(`session:${sessionId}`);
+  return raw ? (JSON.parse(raw) as Session) : null;
+}
+```
+
+### File storage
+
+Uploads written to local disk are visible only to the instance that received them. A user uploads an
+avatar via instance A and gets a 404 loading it via instance B. Object storage solves this, and also
+means instances can be replaced without data loss.
+
+### Scheduled work
+
+A cron job in the application runs on **every** instance. Three instances means three copies of the
+nightly billing run. This needs either a distributed lock, so only one instance proceeds, or an external
+scheduler that dispatches the job to exactly one worker.
+
+### Caches
+
+An in-process cache is per-instance, so the same key can hold different values on different instances
+and an invalidation on one does not affect the others. This is tolerable for immutable data and a
+correctness bug for anything else — which is what a shared cache like Redis is for.
+
+### Rate limiting and counters
+
+A counter in process memory limits per instance, not globally: a limit of 100 requests per minute
+across five instances becomes 500. Anything counting toward a global limit must live in shared storage.
+
+<CommonMistake>
+  Adding instances behind a balancer without removing local state, then debugging intermittent
+  logouts, missing uploads and duplicated jobs. These symptoms are confusing precisely because they
+  depend on which instance served which request — they appear random and are not reproducible on one
+  instance.
+</CommonMistake>
+
+## Scaling stateful components
+
+The distinction between stateless and stateful tiers is what makes this tractable. Application servers
+are usually easy to scale out. Databases are not, because they hold the state everything else depends
+on.
+
+<Steps>
+  <Step title="Scale the database vertically first">
+    This goes much further than people expect, and it requires no application change. It remains the
+    right first move for the overwhelming majority of systems.
+  </Step>
+  <Step title="Add read replicas">
+    Most workloads are read-heavy, so directing reads to replicas removes most of the load from the
+    primary. The cost is **replication lag**: a replica is slightly behind, so a read immediately
+    after a write may not see it. Read-after-write paths must be routed to the primary deliberately.
+  </Step>
+  <Step title="Cache aggressively">
+    A cache in front of the database is often a larger win than another replica, and cheaper. The
+    difficulty moves to invalidation, which is a real problem but a well-understood one.
+  </Step>
+  <Step title="Split by function">
+    Move a distinct, high-volume workload — events, audit logs, sessions, analytics — into its own
+    store. This is far less invasive than sharding and often sufficient.
+  </Step>
+  <Step title="Shard, last">
+    Partition data across independent databases by a shard key. This is the genuine horizontal
+    answer for writes, and it is expensive: cross-shard queries and transactions become hard or
+    impossible, the shard key is difficult to change later, and rebalancing is a project. Do it
+    because you have measured that nothing else will do.
+  </Step>
+</Steps>
+
+## Failure scenarios
+
+<FailureScenarios
+  scenarios={[
+    {
+      failure: 'Vertical ceiling reached under growth',
+      impact: 'No further capacity available and no time to re-architect',
+      mitigation:
+        'Track headroom as a metric and know your ceiling in advance; keep the application stateless so scaling out stays available as an option.',
+    },
+    {
+      failure: 'Scaled out with in-memory sessions',
+      impact: 'Users randomly logged out depending on which instance serves them',
+      mitigation: 'Move sessions to a shared store before adding the second instance.',
+    },
+    {
+      failure: 'Cron jobs on every instance',
+      impact: 'Duplicated billing runs, duplicated emails, duplicated report generation',
+      mitigation: 'A distributed lock or an external scheduler dispatching to a single worker.',
+    },
+    {
+      failure: 'Application tier scaled, database not',
+      impact:
+        'More instances open more connections and the database becomes the bottleneck — adding capacity makes things worse',
+      mitigation: 'A connection pooler such as PgBouncer, plus caching and read replicas.',
+    },
+    {
+      failure: 'Reads served from a lagging replica',
+      impact: 'A user saves a change and immediately sees the old value',
+      mitigation:
+        'Route read-after-write to the primary, or use sticky reads within a session window.',
+    },
+    {
+      failure: 'Instances added but all in one availability zone',
+      impact: 'A zone failure takes out every instance at once — the redundancy was illusory',
+      mitigation: 'Distribute instances across zones and verify by actually removing one.',
+    },
+    {
+      failure: 'Autoscaling with slow instance startup',
+      impact:
+        'Traffic spikes are over before new capacity is ready, so autoscaling provides no protection',
+      mitigation:
+        'Reduce startup time, pre-warm capacity ahead of known peaks, and scale on a leading indicator such as queue depth.',
+    },
+  ]}
+/>
+
+## A practical order of operations
+
+<TradeOffs
+  strengthsLabel="Do these first"
+  weaknessesLabel="Do these when measured need appears"
+  strengths={[
+    'Profile and fix the actual bottleneck — indexes, N+1 queries, missing caches.',
+    'Scale vertically; it is cheap, immediate, and requires no code change.',
+    'Remove local state so scaling out remains available later.',
+    'Run at least two instances across zones, for availability rather than capacity.',
+  ]}
+  weaknesses={[
+    'Autoscaling the stateless tier on a meaningful signal.',
+    'Read replicas, with read-after-write routing handled explicitly.',
+    'Splitting high-volume workloads into their own datastore.',
+    'Sharding, only once nothing simpler will do.',
+  ]}
+>
+  Note that the two lists are not in tension. Removing local state early is what keeps the
+  horizontal option open, so the cheap work and the expensive work are sequenced rather than
+  opposed. Most systems should be architecturally ready to scale out long before they need to.
+</TradeOffs>
+
+<KeyTakeaways
+  points={[
+    'Vertical scaling needs no code change and goes much further than most teams assume.',
+    'Horizontal scaling has a floor cost — a balancer, shared state, distributed debugging — paid immediately.',
+    'Vertical scaling does nothing for availability, which is often the real reason to run more than one instance.',
+    'Statelessness is the prerequisite: sessions, files, caches, counters and schedules must leave the process.',
+    'Fix the bottleneck before adding capacity; an index often beats a bigger fleet.',
+    'Scale stateful components in order: vertically, then replicas, then caching, then functional splits, then sharding.',
+  ]}
+/>

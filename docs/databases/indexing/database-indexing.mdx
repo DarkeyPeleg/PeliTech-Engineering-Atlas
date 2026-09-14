@@ -117,9 +117,9 @@ random order is slower than reading the table sequentially. The planner is usual
 string, can force an implicit cast on the column side and disable the index.
 
 <CommonMistake>
-Concluding an index is unused because the query is still slow, and adding another. Run `EXPLAIN` and
-find out whether the index was chosen and how many rows it actually eliminated. Adding indexes
-without reading a plan is how tables end up with fifteen indexes and slow writes.
+  Concluding an index is unused because the query is still slow, and adding another. Run `EXPLAIN`
+  and find out whether the index was chosen and how many rows it actually eliminated. Adding indexes
+  without reading a plan is how tables end up with fifteen indexes and slow writes.
 </CommonMistake>
 
 ## Composite indexes and column order
@@ -229,7 +229,10 @@ and most under-used indexing techniques, particularly for queue and soft-delete 
     },
     {
       aspect: 'GiST / SP-GiST',
-      values: ['Geometric and geospatial queries, overlapping ranges, nearest-neighbour.', 'Plain scalar lookups.'],
+      values: [
+        'Geometric and geospatial queries, overlapping ranges, nearest-neighbour.',
+        'Plain scalar lookups.',
+      ],
     },
     {
       aspect: 'BRIN',
@@ -372,20 +375,20 @@ periodic rebuilds.
     2-second report run nightly.
   </Step>
   <Step title="Read the plan before changing anything">
-    `EXPLAIN ANALYZE` the real query with realistic parameters. Confirm what the bottleneck is rather
-    than assuming it is a missing index; it may be an N+1 pattern or an unnecessary sort.
+    `EXPLAIN ANALYZE` the real query with realistic parameters. Confirm what the bottleneck is
+    rather than assuming it is a missing index; it may be an N+1 pattern or an unnecessary sort.
   </Step>
   <Step title="Design the index for the whole query">
-    Equality columns first, then the range or sort column. Check whether the existing indexes already
-    provide a usable prefix before adding another.
+    Equality columns first, then the range or sort column. Check whether the existing indexes
+    already provide a usable prefix before adding another.
   </Step>
   <Step title="Consider partial and covering variants">
     If the query only touches a subset of rows, add a `WHERE` predicate to the index. If it selects
     few columns, consider `INCLUDE` for an index-only scan.
   </Step>
   <Step title="Measure, then prune">
-    Re-run the plan to confirm the index is chosen and the row estimates are sane. Then check whether
-    any existing index has become redundant.
+    Re-run the plan to confirm the index is chosen and the row estimates are sane. Then check
+    whether any existing index has become redundant.
   </Step>
 </Steps>
 

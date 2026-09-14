@@ -1,0 +1,62 @@
+name: Bug report
+description: Something in the site itself is broken — rendering, navigation, search, build
+title: 'Bug: '
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open /system-design/scalability/load-balancing
+        2. Resize the window below 768px
+        3. The sidebar stays open
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Article rendering (MDX, components)
+        - Diagrams (Mermaid)
+        - Code blocks or syntax highlighting
+        - Navigation (sidebar, breadcrumbs, prev/next)
+        - Search
+        - Layout or responsive behaviour
+        - Accessibility
+        - Build, typecheck, lint or validation
+        - Something else
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Browser and OS, or Node version for build issues
+      placeholder: Firefox 145 on Ubuntu, or Node 22.14
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Console or build output
+      render: text
+    validations:
+      required: false

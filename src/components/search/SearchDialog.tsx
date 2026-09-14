@@ -11,16 +11,31 @@ import { Badge } from '@/components/ui/Badge';
  * over the static index, with keyboard navigation.
  */
 
-type Status = 'idle' | 'searching' | 'ready' | 'error';
+/**
+ * An outcome carries the query that produced it. That turns "are we still
+ * waiting?" into a comparison at render time, so no effect has to synchronise a
+ * status field with the input — and none of these transitions happen
+ * synchronously during an effect.
+ */
+type Outcome =
+  | { query: string; status: 'ready'; hits: SearchHit[] }
+  | { query: string; status: 'error'; message: string };
 
 export function SearchDialog({ onClose }: { onClose: () => void }) {
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState('');
-  const [hits, setHits] = useState<SearchHit[]>([]);
-  const [status, setStatus] = useState<Status>('idle');
-  const [error, setError] = useState<string | null>(null);
+  const [outcome, setOutcome] = useState<Outcome | null>(null);
   const [activeIndex, setActiveIndex] = useState(0);
+
+  const trimmed = query.trim();
+  const tooShort = trimmed.length < 2;
+
+  const current = outcome?.query === trimmed ? outcome : null;
+  // Memoised so the empty case is a stable reference, keeping the keyboard
+  // handler below from being rebuilt on every keystroke.
+  const hits = useMemo(() => (current?.status === 'ready' ? current.hits : []), [current]);
+  const searching = !tooShort && current === null;
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -36,28 +51,24 @@ export function SearchDialog({ onClose }: { onClose: () => void }) {
 
   // Debounced so typing does not re-query the index on every keystroke.
   useEffect(() => {
-    if (query.trim().length < 2) {
-      setHits([]);
-      setStatus('idle');
-      return;
-    }
+    if (tooShort) return;
 
     let cancelled = false;
-    setStatus('searching');
 
     const timer = window.setTimeout(() => {
-      void search(query)
+      void search(trimmed)
         .then((results) => {
           if (cancelled) return;
-          setHits(results);
+          setOutcome({ query: trimmed, status: 'ready', hits: results });
           setActiveIndex(0);
-          setStatus('ready');
-          setError(null);
         })
         .catch((cause: unknown) => {
           if (cancelled) return;
-          setError(cause instanceof Error ? cause.message : 'Search is unavailable.');
-          setStatus('error');
+          setOutcome({
+            query: trimmed,
+            status: 'error',
+            message: cause instanceof Error ? cause.message : 'Search is unavailable.',
+          });
         });
     }, 120);
 
@@ -65,7 +76,7 @@ export function SearchDialog({ onClose }: { onClose: () => void }) {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [query]);
+  }, [trimmed, tooShort]);
 
   const onKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
@@ -94,12 +105,12 @@ export function SearchDialog({ onClose }: { onClose: () => void }) {
   );
 
   const message = useMemo(() => {
-    if (status === 'error') return error;
-    if (query.trim().length < 2) return 'Type at least two characters.';
-    if (status === 'searching') return 'Searching…';
-    if (hits.length === 0) return `No results for “${query.trim()}”.`;
+    if (current?.status === 'error') return current.message;
+    if (tooShort) return 'Type at least two characters.';
+    if (searching) return 'Searching…';
+    if (hits.length === 0) return `No results for “${trimmed}”.`;
     return null;
-  }, [error, hits.length, query, status]);
+  }, [current, hits.length, searching, tooShort, trimmed]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center px-20 pt-80">
@@ -169,7 +180,7 @@ export function SearchDialog({ onClose }: { onClose: () => void }) {
           <span className="font-charlie-text text-caption text-ink-muted">
             ↑ ↓ to navigate · Enter to open · Esc to close
           </span>
-          {status === 'ready' && hits.length > 0 ? (
+          {hits.length > 0 ? (
             <span className="font-charlie-text text-caption text-ink-muted">
               {hits.length} result{hits.length === 1 ? '' : 's'}
             </span>

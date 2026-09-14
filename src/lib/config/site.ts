@@ -8,9 +8,10 @@
 
 const FALLBACK_URL = 'http://localhost:3000';
 
+const configuredUrl = process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/$/, '') || null;
+
 function resolveSiteUrl(): string {
-  const configured = process.env.NEXT_PUBLIC_SITE_URL;
-  if (configured) return configured.replace(/\/$/, '');
+  if (configuredUrl) return configuredUrl;
 
   // Vercel sets this for preview deployments, where no canonical URL exists yet.
   const vercel = process.env.NEXT_PUBLIC_VERCEL_URL ?? process.env.VERCEL_URL;
@@ -32,8 +33,15 @@ export const siteConfig = {
   locale: 'en_US',
 } as const;
 
-/** `true` only for the canonical production deployment. */
-export const isProductionSite = siteConfig.url === process.env.NEXT_PUBLIC_SITE_URL;
+/**
+ * `true` only for the canonical production deployment, which is what allows
+ * indexing in robots.ts.
+ *
+ * Compared against the normalised value rather than the raw environment variable:
+ * setting `NEXT_PUBLIC_SITE_URL` with a trailing slash would otherwise fail this
+ * check and quietly serve `Disallow: /` in production.
+ */
+export const isProductionSite = configuredUrl !== null && siteConfig.url === configuredUrl;
 
 export function absoluteUrl(path: string): string {
   const normalized = path.startsWith('/') ? path : `/${path}`;

@@ -2,7 +2,15 @@ import type { Metadata } from 'next';
 import { Badge } from '@/components/ui/Badge';
 import { Button, ButtonLink } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
-import { Callout, CommonMistake, Note, ScalabilityNote, SecurityNote, Tip, Warning } from '@/components/mdx/Callout';
+import {
+  Callout,
+  CommonMistake,
+  Note,
+  ScalabilityNote,
+  SecurityNote,
+  Tip,
+  Warning,
+} from '@/components/mdx/Callout';
 import { Steps, Step } from '@/components/mdx/Steps';
 import { TradeOffs } from '@/components/mdx/TradeOffs';
 import { ComparisonTable } from '@/components/mdx/ComparisonTable';
@@ -146,15 +154,21 @@ export default function StyleguidePage() {
             <p className="mt-4 font-charlie-text text-caption text-ink-muted">Muted metadata.</p>
           </div>
           <div className="rounded-cards bg-surface-soft p-24">
-            <p className="font-charlie-display text-subheading font-medium text-ink">Soft surface</p>
-            <p className="mt-8 font-charlie-text text-body text-ink-body">Body copy on fog white.</p>
+            <p className="font-charlie-display text-subheading font-medium text-ink">
+              Soft surface
+            </p>
+            <p className="mt-8 font-charlie-text text-body text-ink-body">
+              Body copy on fog white.
+            </p>
             <p className="mt-4 font-charlie-text text-caption text-ink-muted">Muted metadata.</p>
           </div>
           <div className="rounded-cards bg-surface-tinted p-24">
             <p className="font-charlie-display text-subheading font-medium text-ink">
               Tinted surface
             </p>
-            <p className="mt-8 font-charlie-text text-body text-ink-body">Body copy on blue tint.</p>
+            <p className="mt-8 font-charlie-text text-body text-ink-body">
+              Body copy on blue tint.
+            </p>
             <p className="mt-4 font-charlie-text text-caption text-accent">Accent text.</p>
           </div>
           <div className="rounded-cards bg-surface-band p-24">

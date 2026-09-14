@@ -1,11 +1,9 @@
 import type { MetadataRoute } from 'next';
-import { absoluteUrl, siteConfig } from '@/lib/config/site';
+import { absoluteUrl, isProductionSite, siteConfig } from '@/lib/config/site';
 
 export default function robots(): MetadataRoute.Robots {
   // Preview deployments should never be indexed in place of the canonical site.
-  const isCanonical = siteConfig.url === process.env.NEXT_PUBLIC_SITE_URL;
-
-  if (!isCanonical) {
+  if (!isProductionSite) {
     return { rules: { userAgent: '*', disallow: '/' } };
   }
 

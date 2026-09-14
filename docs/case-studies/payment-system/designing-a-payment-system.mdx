@@ -1,0 +1,625 @@
+---
+title: 'Designing a Payment System'
+description: 'A full system design walkthrough: requirements, capacity, a double-entry ledger, idempotency, the payment state machine, webhook handling, reconciliation, failure modes and security.'
+category: 'Case Studies'
+tags:
+  - payments
+  - system-design
+  - idempotency
+  - ledger
+  - case-study
+difficulty: 'Advanced'
+lastUpdated: '2026-09-14'
+relatedTopics:
+  - integrations/webhooks/webhooks-explained
+  - backend/api-design/rest-api-design
+  - databases/indexing/database-indexing
+---
+
+Payment systems are unusually unforgiving. Most software can tolerate an occasional lost record; a
+payment system cannot, because every error is either someone's money missing or someone charged twice,
+and both are visible to the person affected. The design is dominated by a single question: **how do you
+stay correct when every component involved can fail halfway through?**
+
+This walks through designing the payment layer of a marketplace — buyers pay for orders, funds are held,
+sellers are paid out — integrating with an external payment provider rather than touching card networks
+directly.
+
+<Note>
+  Handling raw card details puts you in scope for the full PCI DSS burden. Almost every system
+  should avoid this by having the card entered directly into a provider-hosted field or SDK, so the
+  number never reaches your servers. This design assumes that model throughout.
+</Note>
+
+## Requirements
+
+<Requirements
+  functional={[
+    'A buyer pays for an order by card or bank transfer.',
+    'The system records every movement of money in an auditable ledger.',
+    'A payment can be refunded in full or in part.',
+    'Funds are held until an order is fulfilled, then paid out to the seller.',
+    'Buyers and sellers can see their transaction history.',
+    'Finance can reconcile internal records against the provider daily.',
+  ]}
+  nonFunctional={[
+    'No double charges, ever — including under client retries and provider redelivery.',
+    'No lost payments: every authorised charge must appear in the ledger.',
+    'Every balance is reconstructible from immutable ledger entries.',
+    'Payment initiation p99 under 500ms, excluding provider redirect time.',
+    'A full audit trail: who did what, when, and why.',
+    'Correct under provider outages, duplicate webhooks and partial failures.',
+  ]}
+  outOfScope={[
+    'Storing raw card data (delegated to the provider).',
+    'Fraud scoring (provider capability plus a separate risk service).',
+    'Multi-currency FX conversion.',
+    'Tax calculation and invoicing.',
+  ]}
+/>
+
+The non-functional list is the design. Every structural decision below exists to satisfy one of those
+guarantees.
+
+## Capacity estimate
+
+<CapacityEstimate
+  estimates={[
+    { label: 'Orders per day', value: '200,000', working: '2M active users × 0.1 orders/day' },
+    { label: 'Average payment writes', value: '~2.3/s', working: '200,000 / 86,400' },
+    { label: 'Peak payment writes', value: '~23/s', working: '10× average during peak hours' },
+    { label: 'Ledger entries per day', value: '~1.2M', working: '200k payments × ~6 entries each' },
+    {
+      label: 'Webhook events per day',
+      value: '~600,000',
+      working: '~3 events per payment lifecycle',
+    },
+    { label: 'Ledger growth per year', value: '~440M rows', working: '1.2M/day × 365' },
+  ]}
+>
+  These numbers are the reason the architecture below is deliberately unexciting. Twenty-three
+  writes per second is trivial for a single PostgreSQL primary — this system does not need sharding,
+  a distributed database, or event sourcing across a cluster. What it needs is *correctness*, and
+  the hard parts are idempotency, state transitions and reconciliation, none of which are throughput
+  problems. Nearly half a billion ledger rows a year does mean partitioning by time from the start.
+</CapacityEstimate>
+
+<Tip>
+  Doing the estimate first is what prevents over-engineering. A payment system sounds like it should
+  be distributed and elaborate; the arithmetic says a single well-designed relational database will
+  carry this comfortably for years.
+</Tip>
+
+## Architecture
+
+```mermaid caption="The payment service owns the ledger and is the only writer to it. Provider callbacks land on a separate receiver so a slow handler can never delay a provider response."
+flowchart TB
+    Client[Buyer client] --> API[API gateway]
+    API --> Orders[Order service]
+    API --> Pay[Payment service]
+    Orders --> Pay
+    Pay --> DB[(Payments + ledger<br/>PostgreSQL)]
+    Pay --> Provider[Payment provider]
+    Provider -.->|webhooks| Recv[Webhook receiver]
+    Recv --> Events[(Event store)]
+    Recv --> Q[Event queue]
+    Q --> Worker[Payment worker]
+    Worker --> DB
+    Worker --> Notify[Notification service]
+    Recon[Reconciliation job] --> Provider
+    Recon --> DB
+    class API service
+    class Orders service
+    class Pay service
+    class Recv service
+    class Worker service
+    class Recon service
+    class Notify service
+    class DB datastore
+    class Events datastore
+    class Q queue
+    class Provider external
+    class Client external
+```
+
+Three boundaries matter here:
+
+**The payment service is the only writer to the ledger.** Not a shared library, not the order service —
+one service. Money movement has invariants that must be enforced in one place, and a second writer is a
+second implementation of those invariants.
+
+**Webhook receipt is separate from webhook processing.** The receiver verifies, records and acknowledges
+in milliseconds. A worker does the actual work. This is what prevents provider timeouts from causing
+duplicate concurrent processing.
+
+**Reconciliation is an independent path to the truth.** It does not depend on webhooks having arrived,
+which is the only way to survive a lost event.
+
+## The ledger
+
+The central design decision is to record money as **immutable double-entry bookkeeping** rather than as
+a mutable balance column.
+
+A `balance` column is the intuitive choice and the wrong one. It answers "how much is there?" but not
+"why?", it cannot be audited, a concurrent update can lose a write, and a bug that corrupts it leaves no
+way to reconstruct the correct value. A ledger of append-only entries answers every question, and the
+balance becomes a derived value.
+
+```sql title="schema.sql"
+-- Every account money can sit in. Provider-facing and internal accounts are both
+-- modelled here so that every entry has two real sides.
+CREATE TABLE accounts (
+  id          bigserial PRIMARY KEY,
+  type        text NOT NULL CHECK (type IN ('buyer', 'seller', 'platform_revenue', 'provider_clearing')),
+  owner_id    bigint,
+  currency    char(3) NOT NULL,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (type, owner_id, currency)
+);
+
+-- A transaction groups the entries that must balance to zero together.
+CREATE TABLE ledger_transactions (
+  id              bigserial PRIMARY KEY,
+  kind            text NOT NULL,     -- payment_captured, refund, payout, fee
+  payment_id      bigint REFERENCES payments(id),
+  -- The idempotency guarantee for money movement: one transaction per cause.
+  idempotency_key text NOT NULL UNIQUE,
+  created_at      timestamptz NOT NULL DEFAULT now()
+);
+
+-- Immutable. No UPDATE, no DELETE — corrections are new, reversing entries.
+CREATE TABLE ledger_entries (
+  id              bigserial,
+  transaction_id  bigint NOT NULL REFERENCES ledger_transactions(id),
+  account_id      bigint NOT NULL REFERENCES accounts(id),
+  -- Integer minor units. Never floating point: 0.1 + 0.2 is not 0.3.
+  amount_cents    bigint NOT NULL CHECK (amount_cents <> 0),
+  currency        char(3) NOT NULL,
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (id, created_at)
+) PARTITION BY RANGE (created_at);
+
+-- Balance queries are always "sum entries for this account", so index for it.
+CREATE INDEX ledger_entries_account_idx ON ledger_entries (account_id, created_at DESC);
+```
+
+Two invariants make this work:
+
+**Entries within a transaction sum to zero.** Money is never created or destroyed, only moved. A
+positive entry on one account is matched by negative entries elsewhere. This makes a whole class of bug
+_detectable_: if any transaction does not balance, something is wrong, and a scheduled check can find it.
+
+**Entries are never modified.** A mistaken entry is corrected by writing a reversing entry, leaving both
+visible. This is what makes the ledger an audit trail rather than a cache of current state.
+
+```sql
+-- A capture of £50.00 with a 10% platform fee: three entries, summing to zero.
+-- provider_clearing  +5000   (money arrived from the provider)
+-- seller               -4500  (owed to the seller)
+-- platform_revenue     -500   (our fee)
+```
+
+<Note>
+  Deriving balances by summing entries is correct but gets slow at hundreds of millions of rows. The
+  standard fix is a periodically-written snapshot per account — balance as of a timestamp — with
+  current balance computed as the snapshot plus entries since. The ledger stays the source of truth;
+  the snapshot is a cache that can always be rebuilt.
+</Note>
+
+## The payment state machine
+
+A payment's lifecycle is a state machine with explicitly allowed transitions. Making it explicit is what
+stops an out-of-order webhook from moving a refunded payment back to succeeded.
+
+```mermaid caption="Allowed transitions only. Terminal states accept no further changes, which is what makes late or duplicate events safe."
+stateDiagram-v2
+    [*] --> pending: created
+    pending --> processing: submitted to provider
+    pending --> expired: not completed in time
+    processing --> requires_action: 3-D Secure needed
+    requires_action --> processing: buyer authenticated
+    requires_action --> failed: authentication failed
+    processing --> succeeded: captured
+    processing --> failed: declined
+    succeeded --> partially_refunded: partial refund
+    succeeded --> refunded: full refund
+    partially_refunded --> refunded: remainder refunded
+    failed --> [*]
+    expired --> [*]
+    refunded --> [*]
+```
+
+```typescript title="state-machine.ts"
+type PaymentStatus =
+  | 'pending'
+  | 'processing'
+  | 'requires_action'
+  | 'succeeded'
+  | 'partially_refunded'
+  | 'refunded'
+  | 'failed'
+  | 'expired';
+
+/**
+ * Transitions are data, not scattered conditionals. An event that does not
+ * correspond to a legal transition is rejected rather than applied — which is how
+ * a delayed `processing` event arriving after `succeeded` becomes a no-op instead
+ * of a corruption.
+ */
+const ALLOWED: Record<PaymentStatus, readonly PaymentStatus[]> = {
+  pending: ['processing', 'expired'],
+  processing: ['succeeded', 'failed', 'requires_action'],
+  requires_action: ['processing', 'failed'],
+  succeeded: ['partially_refunded', 'refunded'],
+  partially_refunded: ['refunded'],
+  // Terminal.
+  refunded: [],
+  failed: [],
+  expired: [],
+};
+
+export function canTransition(from: PaymentStatus, to: PaymentStatus): boolean {
+  return ALLOWED[from].includes(to);
+}
+```
+
+Enforce it in the database too, so no code path can bypass it:
+
+```sql
+-- A conditional UPDATE is an atomic compare-and-set. If another request already
+-- moved the payment on, this affects zero rows and the caller knows it lost.
+UPDATE payments
+SET status = 'succeeded', captured_at = now(), version = version + 1
+WHERE id = $1
+  AND status = 'processing'
+  AND version = $2
+RETURNING *;
+```
+
+## Payment flow
+
+<Steps>
+  <Step title="The client requests a payment intent">
+    The buyer's browser asks our API to start a payment for an order. The request carries an
+    `Idempotency-Key` generated by the client, reused on every retry of the same logical attempt.
+  </Step>
+  <Step title="We validate and record intent before calling the provider">
+    Amount is recomputed server-side from the order — never taken from the client — and a `payments`
+    row is written as `pending` in the same transaction as the idempotency record. Recording intent
+    *before* the external call is what makes an orphaned provider charge discoverable.
+  </Step>
+  <Step title="We create the payment at the provider">
+    Passing our payment id as the provider's idempotency key and as metadata, so the two systems can
+    always be correlated in both directions.
+  </Step>
+  <Step title="The buyer authorises">
+    Via a provider-hosted element or redirect, possibly including a 3-D Secure challenge. Card
+    details never reach us.
+  </Step>
+  <Step title="The provider notifies us by webhook">
+    Signature verified over the raw body, event recorded under a unique constraint, 200 returned
+    immediately, work enqueued.
+  </Step>
+  <Step title="A worker applies the state change and writes the ledger">
+    In one database transaction: conditional status update plus balanced ledger entries. Either both
+    happen or neither does.
+  </Step>
+  <Step title="The order is notified">
+    The payment service publishes `payment.succeeded`; the order service marks the order paid. Note
+    the direction — the payment service does not know about order fulfilment rules.
+  </Step>
+  <Step title="Reconciliation confirms agreement">
+    A daily job compares provider records against ours and raises any divergence for finance.
+  </Step>
+</Steps>
+
+### Idempotent initiation
+
+```typescript title="create-payment.ts"
+/**
+ * Two things make this safe under retries: the idempotency key is reserved in the
+ * same transaction that records intent, and the provider is called with our own
+ * payment id as *its* idempotency key.
+ */
+export async function createPayment(input: CreatePaymentInput): Promise<Payment> {
+  const existing = await db.idempotencyKeys.find(input.idempotencyKey);
+  if (existing) {
+    if (existing.requestHash !== hashRequest(input)) {
+      throw new ConflictError('Idempotency key reused with a different request.');
+    }
+    return db.payments.findById(existing.paymentId);
+  }
+
+  // Trust the order, not the client, for the amount.
+  const order = await db.orders.findById(input.orderId);
+  if (!order || order.customerId !== input.userId) throw new NotFoundError();
+  if (order.status !== 'awaiting_payment') {
+    throw new ConflictError(`Order is ${order.status} and cannot be paid.`);
+  }
+
+  const payment = await db.transaction(async (tx) => {
+    const created = await tx.payments.insert({
+      orderId: order.id,
+      amountCents: order.totalCents,
+      currency: order.currency,
+      status: 'pending',
+      version: 1,
+    });
+
+    // Same transaction: a crash here leaves no key claiming a payment that
+    // does not exist, and no payment that a retry would duplicate.
+    await tx.idempotencyKeys.insert({
+      key: input.idempotencyKey,
+      requestHash: hashRequest(input),
+      paymentId: created.id,
+    });
+
+    return created;
+  });
+
+  /*
+   * Outside the transaction, because an external call must never hold one open.
+   * If this fails or times out, the payment stays `pending` and a sweeper
+   * reconciles it against the provider — the row we wrote above is what makes
+   * that possible.
+   */
+  const intent = await provider.createPaymentIntent({
+    amountCents: payment.amountCents,
+    currency: payment.currency,
+    idempotencyKey: `payment:${payment.id}`,
+    metadata: { paymentId: String(payment.id), orderId: String(order.id) },
+  });
+
+  await db.payments.update(payment.id, {
+    providerRef: intent.id,
+    status: 'processing',
+    version: payment.version + 1,
+  });
+
+  return { ...payment, providerRef: intent.id, status: 'processing' };
+}
+```
+
+<SecurityNote>
+  The amount must be recalculated server-side from the order. An endpoint that accepts an `amount`
+  parameter from the client can be called with a different one — this is among the most frequently
+  exploited flaws in payment integrations, and it is trivially exploitable with browser dev tools.
+</SecurityNote>
+
+### Applying a capture
+
+```typescript title="apply-capture.ts"
+/**
+ * The status change and the ledger entries are one transaction. There is no state
+ * in which a payment reads as succeeded but no money was recorded, or vice versa.
+ */
+export async function applyCapture(event: ProviderEvent): Promise<void> {
+  await db.transaction(async (tx) => {
+    const payment = await tx.payments.findByProviderRef(event.data.id, { forUpdate: true });
+
+    if (!payment) {
+      // The event beat our own write. Retry rather than discard.
+      throw new RetryableError('Payment not found for provider reference');
+    }
+
+    if (payment.status === 'succeeded') return; // Duplicate delivery.
+
+    if (!canTransition(payment.status, 'succeeded')) {
+      // A late event for a payment that has moved on. Record and move on rather
+      // than retrying forever.
+      await tx.paymentEventLog.insert({
+        paymentId: payment.id,
+        outcome: 'ignored_illegal_transition',
+        from: payment.status,
+        to: 'succeeded',
+        providerEventId: event.id,
+      });
+      return;
+    }
+
+    // Verify the provider agrees on the amount before recording anything.
+    if (event.data.amountCents !== payment.amountCents) {
+      throw new ReconciliationError(
+        `Amount mismatch: provider ${event.data.amountCents}, expected ${payment.amountCents}`,
+      );
+    }
+
+    await tx.payments.update(payment.id, { status: 'succeeded', capturedAt: event.createdAt });
+
+    const feeCents = calculatePlatformFee(payment.amountCents);
+    await writeBalancedTransaction(tx, {
+      kind: 'payment_captured',
+      paymentId: payment.id,
+      // Derived from the event id, so a retry cannot write the entries twice.
+      idempotencyKey: `capture:${event.id}`,
+      entries: [
+        { accountId: await clearingAccount(payment.currency), amountCents: payment.amountCents },
+        { accountId: await sellerAccount(payment), amountCents: -(payment.amountCents - feeCents) },
+        { accountId: await revenueAccount(payment.currency), amountCents: -feeCents },
+      ],
+    });
+  });
+}
+```
+
+## Reconciliation
+
+Reconciliation is not a nicety. It is the mechanism that makes every other guarantee verifiable, because
+it is the only check that does not assume the happy path worked.
+
+A daily job fetches the provider's settlement report and compares it against the ledger, looking for
+four specific divergences:
+
+- **In the provider, not in our ledger** — usually a lost webhook. Most common, and the reason the job
+  exists.
+- **In our ledger, not in the provider** — potentially serious: we recorded money that never arrived.
+- **Amount mismatch** — a fee change, an FX difference, or a bug.
+- **Status mismatch** — a refund or dispute we never processed.
+
+Alongside it, a cheaper continuous check catches the other class of problem:
+
+```sql
+-- Any transaction whose entries do not sum to zero indicates a bug in ledger
+-- writing. This should always return no rows; alert immediately if it does not.
+SELECT transaction_id, SUM(amount_cents) AS imbalance
+FROM ledger_entries
+WHERE created_at > now() - interval '1 day'
+GROUP BY transaction_id
+HAVING SUM(amount_cents) <> 0;
+```
+
+And a sweeper resolves payments stuck in a non-terminal state, which is how the "we called the provider
+but never learned the outcome" case gets closed:
+
+```typescript
+/**
+ * Payments left `pending` or `processing` past a threshold are asked about
+ * directly. This is what turns an ambiguous timeout into a definite answer.
+ */
+for (const payment of await db.payments.findStuck({ olderThan: '15 minutes' })) {
+  const remote = payment.providerRef
+    ? await provider.getPaymentIntent(payment.providerRef)
+    : await provider.findByIdempotencyKey(`payment:${payment.id}`);
+
+  if (!remote) {
+    await expirePayment(payment);
+    continue;
+  }
+  await applyProviderState(payment, remote);
+}
+```
+
+## Failure scenarios
+
+<FailureScenarios
+  scenarios={[
+    {
+      failure: 'Client retries payment initiation after a timeout',
+      impact: 'Two payment intents and potentially two charges for one order',
+      mitigation:
+        'Client-supplied idempotency key reserved in the same transaction as the payment row, plus our payment id as the provider-side idempotency key.',
+    },
+    {
+      failure: 'We call the provider and never receive a response',
+      impact: 'A charge may exist that we have no record of — money taken, order unpaid',
+      mitigation:
+        'Record intent before calling out; sweep non-terminal payments and query the provider directly to resolve them.',
+    },
+    {
+      failure: 'Webhook delivered twice',
+      impact: 'Double ledger entries and a double payout',
+      mitigation:
+        'Unique constraint on provider event id, conditional state transitions, and ledger idempotency keys derived from the event id.',
+    },
+    {
+      failure: 'Webhooks arrive out of order',
+      impact: 'A refunded payment reverts to succeeded',
+      mitigation:
+        'An explicit state machine that rejects illegal transitions and logs them rather than applying them.',
+    },
+    {
+      failure: 'Webhook never arrives',
+      impact: 'A paid order stays unpaid indefinitely and the buyer contacts support',
+      mitigation: 'Reconciliation against the provider, plus the stuck-payment sweeper.',
+    },
+    {
+      failure: 'Provider is down during checkout',
+      impact: 'No payments can be taken',
+      mitigation:
+        'Fail fast with a clear message, offer an alternative method, and consider a secondary provider for high volume.',
+    },
+    {
+      failure: 'Concurrent refund requests for the same payment',
+      impact: 'Refunded total exceeds the amount captured',
+      mitigation:
+        'Row-level lock plus a database constraint that refunded_cents may never exceed captured_cents.',
+    },
+    {
+      failure: 'Amount taken from the client request',
+      impact: 'A buyer pays £0.01 for a £100 order',
+      mitigation:
+        'Always recompute the amount server-side from the order, and verify it against the provider event.',
+    },
+    {
+      failure: 'Money held in floating point',
+      impact: 'Rounding errors accumulate and balances stop reconciling to the penny',
+      mitigation: 'Integer minor units everywhere, or a fixed-point decimal type. Never a float.',
+    },
+    {
+      failure: 'Ledger write partially applied',
+      impact: 'An unbalanced transaction — money apparently created or destroyed',
+      mitigation:
+        'Write all entries in one database transaction, and run a continuous balance assertion that alerts on any imbalance.',
+    },
+  ]}
+/>
+
+## Security considerations
+
+<SecurityNote>
+  Payment endpoints are attacked deliberately rather than incidentally. Assume every input is
+  hostile and every amount is a target.
+</SecurityNote>
+
+- **Never handle raw card data.** Provider-hosted fields keep the number out of your infrastructure and
+  out of PCI scope.
+- **Recompute amounts server-side**, and verify the provider's reported amount before recording a
+  capture.
+- **Verify webhook signatures** over the raw body with a constant-time comparison, and reject requests
+  with stale timestamps to prevent replay.
+- **Authorize object access.** A buyer may see their own payments only; a seller may see payouts owed to
+  them. Missing object-level checks here expose other people's transactions.
+- **Rate limit initiation.** Payment endpoints are used for card testing, where stolen numbers are
+  validated with small charges against whatever endpoint accepts them.
+- **Make the audit log immutable and complete.** Who initiated, who refunded, what changed, when. This
+  is both a security control and a dispute-resolution tool.
+- **Keep secrets out of the codebase**, support two valid webhook secrets during rotation, and rotate on
+  a schedule.
+- **Never log full payloads.** Provider references and tokens in logs are credentials sitting in your
+  observability stack.
+
+## Trade-offs made
+
+<TradeOffs
+  strengths={[
+    'An immutable double-entry ledger makes every balance auditable and reconstructible.',
+    'Idempotency at three layers — client key, provider key, ledger key — makes duplicates harmless.',
+    'An explicit state machine makes out-of-order and duplicate events safe by construction.',
+    'Reconciliation gives a second, independent path to the truth.',
+    'A single relational primary keeps transactions cheap and the design simple.',
+  ]}
+  weaknesses={[
+    'More writes and more schema than a mutable balance column.',
+    'Balance queries need snapshots once the ledger grows large.',
+    'Asynchronous webhook processing means brief windows of not-yet-known state that the UI must handle.',
+    'Reconciliation is real ongoing operational work, not a one-off build.',
+    'A single primary caps write throughput — fine here, but a future constraint.',
+  ]}
+>
+  The consistent theme is choosing verifiable correctness over convenience. Every one of these costs
+  buys a guarantee that a payment system cannot do without, and the capacity estimate is what
+  justifies keeping the infrastructure boring while spending the complexity budget on correctness
+  instead.
+</TradeOffs>
+
+## What would change at ten times the scale
+
+At 230 writes per second the ledger becomes the pressure point. The realistic progression: partition
+`ledger_entries` by month and archive cold partitions; add balance snapshots so no query sums a full
+account history; move the read path to replicas with read-after-write routed to the primary; and split
+payouts into their own service with its own store, since payout batching has a different access pattern
+from payment capture. Sharding the ledger by account would come last, because cross-account transactions
+are exactly what sharding makes difficult.
+
+<KeyTakeaways
+  points={[
+    'Estimate capacity first — a payment system usually needs correctness, not scale, and the arithmetic proves it.',
+    'Record money as immutable double-entry transactions; balances are derived, never stored as truth.',
+    'Integer minor units only. Floating point money does not reconcile.',
+    'Layer idempotency: a client key, a provider key, and a ledger key derived from the event id.',
+    'Model the lifecycle as an explicit state machine so late and duplicate events are safe by construction.',
+    'Write intent before calling the provider, so an ambiguous timeout is recoverable.',
+    'Reconciliation and continuous balance assertions are what make the guarantees verifiable rather than assumed.',
+    'Recompute amounts server-side and verify against the provider — never trust the client.',
+  ]}
+/>

@@ -35,7 +35,15 @@ function DocLink({ node, active }: { node: NavNode & { type: 'doc' }; active: bo
   );
 }
 
-function SectionGroup({ node, pathname, depth }: { node: NavNode & { type: 'section' }; pathname: string; depth: number }) {
+function SectionGroup({
+  node,
+  pathname,
+  depth,
+}: {
+  node: NavNode & { type: 'section' };
+  pathname: string;
+  depth: number;
+}) {
   const containsCurrent = isWithin(pathname, node.slug);
   const [open, setOpen] = useState(containsCurrent || !node.collapsed);
   const hasChildren = node.children.length > 0;

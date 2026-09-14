@@ -1,0 +1,314 @@
+---
+title: 'PostgreSQL vs MongoDB'
+description: 'A relational database and a document database compared on data modelling, consistency, querying, scaling and operations — with the conditions that favour each.'
+category: 'Engineering Decisions'
+tags:
+  - databases
+  - postgresql
+  - mongodb
+  - sql
+  - nosql
+difficulty: 'Intermediate'
+lastUpdated: '2026-09-14'
+relatedTopics:
+  - databases/indexing/database-indexing
+  - decisions/monolith-vs-microservices
+---
+
+PostgreSQL is a relational database: data lives in tables with a declared schema, and relationships
+are expressed with foreign keys and resolved with joins. MongoDB is a document database: data lives in
+flexible JSON-like documents, and related data is typically **embedded** in the document that needs it.
+
+Most comparisons of the two are a decade out of date. MongoDB has had multi-document ACID transactions
+since 2018 and schema validation since 2015; PostgreSQL has had a binary JSON type with rich indexing
+since 2014. Neither "MongoDB cannot do transactions" nor "PostgreSQL cannot handle documents" has been
+true for a long time.
+
+What remains genuinely different is **which access pattern each is optimised for**, and that is the
+useful basis for a decision.
+
+## The core difference: where relationships are resolved
+
+Everything else follows from this.
+
+In PostgreSQL, related data lives in separate tables and is assembled **at read time** by a join. The
+data is stored once, so there is exactly one place to update it, and any query can combine it in any
+way.
+
+In MongoDB, related data is typically embedded in one document and assembled **at write time**. A
+read is then a single document fetch with no join at all — but the same information may be duplicated
+across many documents, so updating it means updating all of them.
+
+```mermaid caption="The same order data. Relational stores each fact once and joins on read; document embeds for single-read access and duplicates."
+flowchart TB
+    subgraph pg [PostgreSQL: normalised, joined on read]
+        direction TB
+        O[orders<br/>id, customer_id, total] --> C[customers<br/>id, name, email]
+        O --> OI[order_items<br/>order_id, product_id, qty]
+        OI --> P[products<br/>id, name, price]
+    end
+    subgraph mg [MongoDB: embedded, one read]
+        direction TB
+        D["orders document<br/>{ _id, total,<br/>&nbsp;&nbsp;customer: { name, email },<br/>&nbsp;&nbsp;items: [ { name, price, qty } ] }"]
+    end
+    class O datastore
+    class C datastore
+    class OI datastore
+    class P datastore
+    class D datastore
+```
+
+```sql title="PostgreSQL — one query, joined at read time"
+SELECT o.id, o.total_cents, c.name, c.email,
+       json_agg(json_build_object('name', p.name, 'qty', oi.quantity)) AS items
+FROM orders o
+JOIN customers c ON c.id = o.customer_id
+JOIN order_items oi ON oi.order_id = o.id
+JOIN products p ON p.id = oi.product_id
+WHERE o.id = $1
+GROUP BY o.id, c.name, c.email;
+```
+
+```javascript title="MongoDB — one document, assembled at write time"
+// A single read, no join. The customer name and product prices were copied in
+// when the order was created — which is arguably correct here, since an order
+// should record the price at purchase, not today's price.
+db.orders.findOne({ _id: orderId });
+```
+
+That last comment matters, because it shows the choice is not purely technical. For an order, the
+duplication is _desirable_: you want the historical price, not a join to a product whose price has
+since changed. For a customer's email address, duplication across ten thousand orders is a liability —
+one change now means ten thousand writes, and any missed one is permanent inconsistency.
+
+The practical rule that follows: **embed data that is genuinely part of the parent and is read with it;
+reference data that has its own lifecycle and is shared.**
+
+## Comparison
+
+<ComparisonTable
+  options={['PostgreSQL', 'MongoDB']}
+  aspectLabel="Aspect"
+  rows={[
+    {
+      aspect: 'Schema',
+      values: [
+        'Declared and enforced by the database. Changing it is a migration.',
+        'Flexible per document; optional JSON Schema validation. Changing it is a code concern.',
+      ],
+    },
+    {
+      aspect: 'Relationships',
+      values: [
+        'Foreign keys with referential integrity; arbitrary joins at query time.',
+        'Embedding, or manual references resolved with $lookup. No enforced integrity.',
+      ],
+    },
+    {
+      aspect: 'Transactions',
+      values: [
+        'ACID across any number of tables. Mature and cheap.',
+        'ACID across documents since 4.0, but with performance caveats — the model assumes you rarely need them.',
+      ],
+    },
+    {
+      aspect: 'Query language',
+      values: [
+        'SQL: declarative, standardised, with a sophisticated cost-based planner.',
+        'MQL and the aggregation pipeline: composable stages, expressive, MongoDB-specific.',
+      ],
+    },
+    {
+      aspect: 'Ad-hoc analytics',
+      values: [
+        'A strength. Arbitrary joins, window functions, CTEs, and every BI tool speaks SQL.',
+        'Possible via aggregation, harder across collections; usually offloaded to a warehouse.',
+      ],
+    },
+    {
+      aspect: 'Horizontal write scaling',
+      values: [
+        'Not built in. Read replicas are easy; sharding needs Citus or application-level partitioning.',
+        'Built-in sharding by shard key. The clearest structural advantage.',
+      ],
+    },
+    {
+      aspect: 'Read scaling',
+      values: [
+        'Streaming replicas, with replication lag to design around.',
+        'Replica sets with tunable read preference and concern.',
+      ],
+    },
+    {
+      aspect: 'Consistency default',
+      values: [
+        'Strong on the primary; replicas are asynchronous by default.',
+        'Tunable per operation via write and read concerns.',
+      ],
+    },
+    {
+      aspect: 'Document support',
+      values: [
+        'JSONB with GIN indexing — genuinely capable, not a token feature.',
+        'Native; the entire model.',
+      ],
+    },
+    {
+      aspect: 'Extensibility',
+      values: [
+        'Extensions: PostGIS, pgvector, TimescaleDB, full-text search — often removes the need for a second system.',
+        'Atlas Search and vector search, largely as managed services.',
+      ],
+    },
+    {
+      aspect: 'Operational maturity',
+      values: [
+        'Decades of tooling; every managed provider offers it. Needs vacuum and connection-pool attention.',
+        'Straightforward to run; Atlas is excellent. Shard key mistakes are expensive to correct.',
+      ],
+    },
+  ]}
+/>
+
+## PostgreSQL's decisive advantages
+
+**Constraints the database enforces.** A `NOT NULL`, a `CHECK`, a `UNIQUE`, a foreign key — these hold
+regardless of which application, script, migration or intern touches the data. Application-level
+validation protects only the paths that run it, and every system eventually accumulates paths that do
+not: a backfill script, an admin tool, a bulk import.
+
+```sql
+-- Guarantees that survive any code path, forever
+CREATE TABLE order_items (
+  id           bigserial PRIMARY KEY,
+  order_id     bigint NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  product_id   bigint NOT NULL REFERENCES products(id),
+  quantity     integer NOT NULL CHECK (quantity > 0),
+  price_cents  integer NOT NULL CHECK (price_cents >= 0),
+  UNIQUE (order_id, product_id)
+);
+```
+
+There is no orphaned order item in this schema. Not because the code is careful, but because the
+database will refuse.
+
+**Queries nobody anticipated.** The great practical strength of the relational model is that
+normalised data can be queried in ways the original designer never considered. "Revenue by region by
+month for customers who churned within 90 days of first purchase" is a SQL query against an existing
+schema. Against a document model optimised for order lookups, it may require a new pipeline, a
+migration, or an export.
+
+**Extensions that consolidate your stack.** PostGIS for geospatial, pgvector for embeddings,
+TimescaleDB for time series, built-in full-text search. Each is one fewer system to operate, secure,
+back up and keep in sync — an underrated benefit for small teams.
+
+## MongoDB's decisive advantages
+
+**Built-in horizontal write scaling.** This is the real structural difference. PostgreSQL scales writes
+vertically, plus read replicas; past a single primary's capacity you need Citus or to partition in the
+application, and both are significant projects. MongoDB shards natively: choose a shard key, add
+shards, and the cluster distributes data and routes queries.
+
+**A schema that changes without migration.** When the shape of data genuinely varies — product
+catalogues where every category has different attributes, event payloads that differ per type,
+integrations whose fields you do not control — a flexible document avoids either a sparse table of
+mostly-null columns or an entity-attribute-value schema that is miserable to query.
+
+**Single-read access for the queries you designed for.** Fetching a fully-formed document with no join
+is genuinely fast and stays fast as the collection grows, because the work was done at write time.
+
+**A natural fit for object-shaped data.** When your domain objects really are self-contained
+hierarchies, storing them as documents removes an entire mapping layer.
+
+## What to be honest about
+
+Two claims deserve pushing back on.
+
+**"Schemaless means no schema."** It does not. It means the schema is enforced by application code
+rather than the database, and typically exists in several versions simultaneously as documents written
+by older code persist. That is a legitimate trade, and it means every reader must handle every historic
+shape. Without discipline — schema validation, versioned documents, migration jobs — this becomes a
+long-term liability. The schema did not disappear; responsibility for it moved.
+
+**"PostgreSQL cannot handle JSON."** JSONB is a first-class type with GIN indexing, containment
+operators and path queries:
+
+```sql
+-- Flexible attributes inside a relational schema, and indexed
+CREATE TABLE products (
+  id         bigserial PRIMARY KEY,
+  sku        text NOT NULL UNIQUE,
+  name       text NOT NULL,
+  attributes jsonb NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX products_attributes_idx ON products USING gin (attributes);
+
+-- Containment query, served by the GIN index
+SELECT sku, name FROM products
+WHERE attributes @> '{"colour": "black", "wireless": true}';
+```
+
+This hybrid — relational core with JSONB for genuinely variable parts — is often the best answer, and
+it is the option most comparisons omit. Enforce structure where it matters, stay flexible where it
+does not, in one system.
+
+<CommonMistake>
+  Choosing a document database to avoid designing a schema. The data model is the most consequential
+  decision in most applications; postponing it does not remove it. If the domain has clear entities
+  with clear relationships — users, orders, products — that structure exists whether or not the
+  database enforces it, and having it enforced is a benefit rather than a constraint.
+</CommonMistake>
+
+## Choosing
+
+**Choose PostgreSQL when** the domain is relational and you can describe it in entities and
+relationships; correctness matters more than write throughput (finance, healthcare, anything with an
+audit requirement); you need ad-hoc analytical queries; multi-entity transactions are common; a single
+primary plus read replicas will plausibly carry your write volume; or you want one system to also cover
+geospatial, search or vector needs. This is the right default for most applications, and "we outgrew
+Postgres" is a much rarer problem than it is anticipated to be.
+
+**Choose MongoDB when** write volume genuinely exceeds what one primary can take and sharding is
+required rather than hypothetical; the data shape is genuinely heterogeneous or externally determined;
+your access pattern is dominated by fetching self-contained documents by key; or the domain really is
+hierarchical with few cross-entity queries.
+
+**Consider both** when one part of the system is relational and another is not. A relational core with
+a document store for high-volume event or activity data is a reasonable architecture. The cost is two
+systems to operate and no transaction spanning them, so it should be a deliberate decision rather than
+a drift.
+
+<TradeOffs
+  strengthsLabel="What you gain from PostgreSQL"
+  weaknessesLabel="What you gain from MongoDB"
+  strengths={[
+    'Constraints the database enforces regardless of code path.',
+    'Arbitrary joins, so future queries do not require remodelling.',
+    'Mature, cheap multi-table transactions.',
+    'Extensions that replace whole categories of separate infrastructure.',
+  ]}
+  weaknesses={[
+    'Native sharding for write throughput beyond one machine.',
+    'Schema flexibility where data shape is genuinely variable.',
+    'Single-read document access with no join cost.',
+    'A natural fit for self-contained hierarchical objects.',
+  ]}
+>
+  The asymmetry worth noting: PostgreSQL's main limitation — horizontal write scaling — is a problem
+  most applications never reach, and it can be addressed later with Citus or partitioning. MongoDB's
+  main limitation — no enforced relational integrity and expensive cross-entity querying — shows up
+  in everyday development from the first month. Weigh the certain cost more heavily than the
+  possible one.
+</TradeOffs>
+
+<KeyTakeaways
+  points={[
+    'The real difference is whether relationships are resolved at read time (join) or write time (embed).',
+    'Embed what is part of the parent and read with it; reference what has its own lifecycle.',
+    'Database-enforced constraints hold across every code path; application validation does not.',
+    "Native sharding is MongoDB's clearest structural advantage — and a limit most systems never reach.",
+    '"Schemaless" moves schema responsibility into application code, where several versions coexist.',
+    'A relational core with JSONB columns is frequently the best answer, and usually the one left out.',
+  ]}
+/>

@@ -14,7 +14,7 @@ relatedTopics:
   - case-studies/payment-system/designing-a-payment-system
 ---
 
-A webhook is an HTTP request a provider sends *to you* when something happens in their system. It
+A webhook is an HTTP request a provider sends _to you_ when something happens in their system. It
 inverts the usual arrangement: instead of your server calling an API and waiting for an answer, the
 provider calls your server and expects one.
 
@@ -124,11 +124,11 @@ export function verifySignature(
 ```
 
 <SecurityNote>
-Three ways this goes wrong in real codebases. Comparing signatures with `===`, which leaks the
-correct value through timing and allows it to be recovered byte by byte. Signing the *parsed* body,
-which fails intermittently because key order and whitespace are not preserved — so you must capture
-the raw body before any JSON middleware consumes it. And skipping the timestamp check, which leaves
-a validly signed request replayable forever by anyone who captured it once.
+  Three ways this goes wrong in real codebases. Comparing signatures with `===`, which leaks the
+  correct value through timing and allows it to be recovered byte by byte. Signing the *parsed*
+  body, which fails intermittently because key order and whitespace are not preserved — so you must
+  capture the raw body before any JSON middleware consumes it. And skipping the timestamp check,
+  which leaves a validly signed request replayable forever by anyone who captured it once.
 </SecurityNote>
 
 ### Acknowledge fast, process later
@@ -136,7 +136,7 @@ a validly signed request replayable forever by anyone who captured it once.
 Providers impose a short timeout — commonly a few seconds — and treat a slow response as a failure,
 which triggers a retry. If your handler does the real work inline, a slow database or a third-party
 call makes you time out, the provider retries, and you now process the same event twice
-*concurrently*.
+_concurrently_.
 
 The correct shape is to persist the event and return immediately:
 
@@ -181,8 +181,8 @@ export async function POST(request: Request): Promise<Response> {
 }
 ```
 
-This separates two concerns that are often mixed: *receipt* is fast, synchronous and idempotent, while
-*processing* is asynchronous, retryable on your own terms, and free to be slow.
+This separates two concerns that are often mixed: _receipt_ is fast, synchronous and idempotent, while
+_processing_ is asynchronous, retryable on your own terms, and free to be slow.
 
 ### Make processing idempotent too
 
@@ -224,7 +224,7 @@ one. Two workable strategies:
 have already stored, and discarding anything older.
 
 **Re-fetch current state** from the provider's API instead of trusting the payload's contents. The
-event then becomes a hint that *something changed about this object*, and the API call establishes what
+event then becomes a hint that _something changed about this object_, and the API call establishes what
 is true now. This is more requests but considerably simpler to reason about, and it sidesteps ordering
 entirely.
 
@@ -240,9 +240,9 @@ now running every few minutes over a bounded window rather than continuously ove
 serving as a safety net rather than the primary mechanism.
 
 <Tip>
-Treat webhooks as a latency optimisation over reconciliation, not as the only source of truth. Systems
-built this way survive outages and provider incidents without manual repair; systems that trust
-webhooks completely eventually need someone to fix state by hand.
+  Treat webhooks as a latency optimisation over reconciliation, not as the only source of truth.
+  Systems built this way survive outages and provider incidents without manual repair; systems that
+  trust webhooks completely eventually need someone to fix state by hand.
 </Tip>
 
 ## Full lifecycle
@@ -263,8 +263,8 @@ webhooks completely eventually need someone to fix state by hand.
     and return 200 — ideally in well under a second.
   </Step>
   <Step title="A worker processes the event">
-    Idempotently, with its own retry policy and backoff, and a dead-letter destination for events that
-    keep failing.
+    Idempotently, with its own retry policy and backoff, and a dead-letter destination for events
+    that keep failing.
   </Step>
   <Step title="Reconciliation catches what was missed">
     A scheduled job compares recent provider state against yours and repairs any divergence.
@@ -300,7 +300,8 @@ webhooks completely eventually need someone to fix state by hand.
       failure: 'Signature not verified',
       impact:
         'Anyone who finds the URL can forge events — marking orders paid, granting subscriptions',
-      mitigation: 'Verify the HMAC over the raw body with a constant-time comparison, before parsing.',
+      mitigation:
+        'Verify the HMAC over the raw body with a constant-time comparison, before parsing.',
     },
     {
       failure: 'Duplicate delivery processed twice',
@@ -317,12 +318,14 @@ webhooks completely eventually need someone to fix state by hand.
     {
       failure: 'Events arrive out of order',
       impact: 'A stale update overwrites a newer one — a cancelled order reverts to active',
-      mitigation: 'Compare versions or timestamps before applying, or re-fetch current state from the API.',
+      mitigation:
+        'Compare versions or timestamps before applying, or re-fetch current state from the API.',
     },
     {
       failure: 'Your endpoint is down for the whole retry window',
       impact: 'Events are lost permanently and your state silently diverges from the provider',
-      mitigation: 'Scheduled reconciliation over a bounded window, and alerting on delivery failures.',
+      mitigation:
+        'Scheduled reconciliation over a bounded window, and alerting on delivery failures.',
     },
     {
       failure: 'An event references a record you have not created yet',
@@ -336,7 +339,8 @@ webhooks completely eventually need someone to fix state by hand.
     },
     {
       failure: 'Signing secret leaked or rotated',
-      impact: 'Either forged events are accepted, or all legitimate events start failing verification',
+      impact:
+        'Either forged events are accepted, or all legitimate events start failing verification',
       mitigation:
         'Store secrets outside the codebase, accept two valid secrets during rotation, rotate on a schedule.',
     },

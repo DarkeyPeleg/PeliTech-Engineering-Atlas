@@ -19,49 +19,28 @@ interface MermaidProps {
   caption?: string;
 }
 
+/*
+ * There is no distinct `loading` state because it would render identically to
+ * `pending`: the diagram is either on screen or it is not. Keeping the machine at
+ * three states means every transition happens in an async callback, so the
+ * component never sets state synchronously during an effect.
+ */
 type RenderState =
-  | { status: 'idle' | 'loading' }
-  | { status: 'ready'; svg: string }
-  | { status: 'error'; message: string };
+  { status: 'pending' } | { status: 'ready'; svg: string } | { status: 'error'; message: string };
 
 export function Mermaid({ chart, caption }: MermaidProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [state, setState] = useState<RenderState>({ status: 'idle' });
-  const [visible, setVisible] = useState(false);
+  const [state, setState] = useState<RenderState>({ status: 'pending' });
   // Mermaid requires a DOM-safe, unique id per diagram.
   const domId = `mermaid-${useId().replace(/[^a-zA-Z0-9]/g, '')}`;
 
   useEffect(() => {
     const node = containerRef.current;
-    if (!node || visible) return;
-
-    if (typeof IntersectionObserver === 'undefined') {
-      setVisible(true);
-      return;
-    }
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) {
-          setVisible(true);
-          observer.disconnect();
-        }
-      },
-      // Start loading slightly before the diagram reaches the viewport.
-      { rootMargin: '200px' },
-    );
-
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, [visible]);
-
-  useEffect(() => {
-    if (!visible) return;
+    if (!node) return;
 
     let cancelled = false;
-    setState({ status: 'loading' });
 
-    void (async () => {
+    async function render(): Promise<void> {
       try {
         const mermaid = (await import('mermaid')).default;
         mermaid.initialize(mermaidConfig);
@@ -75,12 +54,35 @@ export function Mermaid({ chart, caption }: MermaidProps) {
           });
         }
       }
-    })();
+    }
+
+    // Without IntersectionObserver, render straight away rather than leaving the
+    // diagram permanently blank.
+    if (typeof IntersectionObserver === 'undefined') {
+      void render();
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          observer.disconnect();
+          void render();
+        }
+      },
+      // Start loading slightly before the diagram reaches the viewport.
+      { rootMargin: '200px' },
+    );
+
+    observer.observe(node);
 
     return () => {
       cancelled = true;
+      observer.disconnect();
     };
-  }, [visible, chart, domId]);
+  }, [chart, domId]);
 
   return (
     <figure className="my-32">

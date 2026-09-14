@@ -8,11 +8,16 @@ import { usePathname } from 'next/navigation';
  * is passed in as children so the mobile shell never duplicates navigation data.
  */
 export function MobileNav({ children }: { children: ReactNode }) {
-  const [open, setOpen] = useState(false);
   const pathname = usePathname();
 
-  // Navigating should dismiss the panel.
-  useEffect(() => setOpen(false), [pathname]);
+  /*
+   * The panel records the route it was opened on rather than a boolean, which
+   * makes "navigating dismisses the panel" fall out of the render: tapping a link
+   * changes the pathname, so `open` is false on the next render with no effect
+   * synchronising the two.
+   */
+  const [openedOn, setOpenedOn] = useState<string | null>(null);
+  const open = openedOn === pathname;
 
   // Prevent the page behind the panel from scrolling.
   useEffect(() => {
@@ -27,7 +32,7 @@ export function MobileNav({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false);
+      if (event.key === 'Escape') setOpenedOn(null);
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
@@ -37,7 +42,7 @@ export function MobileNav({ children }: { children: ReactNode }) {
     <div className="lg:hidden">
       <button
         type="button"
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => setOpenedOn(open ? null : pathname)}
         aria-expanded={open}
         aria-controls="mobile-navigation"
         className="rounded-full border border-border-subtle px-16 py-8 font-charlie-text text-ui font-medium text-ink"

@@ -36,10 +36,7 @@ const prettyCodeOptions: PrettyCodeOptions = {
   getHighlighter: () => getHighlighter(),
 };
 
-export async function renderMdx(
-  source: string,
-  components: MDXComponents,
-): Promise<ReactElement> {
+export async function renderMdx(source: string, components: MDXComponents): Promise<ReactElement> {
   const { content } = await compileMDX({
     source,
     components,

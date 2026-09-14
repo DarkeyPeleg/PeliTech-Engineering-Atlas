@@ -1,0 +1,311 @@
+---
+title: 'Monolith vs Microservices'
+description: 'What actually differs between the two, why microservices trade code complexity for operational complexity, and the conditions under which each is the right answer.'
+category: 'Engineering Decisions'
+tags:
+  - architecture
+  - microservices
+  - monolith
+  - system-design
+difficulty: 'Intermediate'
+lastUpdated: '2026-09-14'
+relatedTopics:
+  - system-design/scalability/load-balancing
+  - decisions/postgresql-vs-mongodb
+---
+
+A **monolith** deploys as a single unit. All the code ships together, runs in one process type, and
+usually shares one database. **Microservices** split the system into independently deployable
+services, each owning its own data, communicating over the network.
+
+The choice is usually framed as monolith-for-small-teams and microservices-for-scale. That framing is
+misleading, because it treats the decision as being about size when it is really about
+**independence** — and independence is bought with coordination cost you pay forever.
+
+## What is actually being traded
+
+A useful way to see it: the total complexity of a system is roughly constant, and the architecture
+decides where it lives.
+
+In a monolith, complexity lives **in the code**. As the system grows, modules entangle, boundaries
+blur, and a change in one area breaks something apparently unrelated. But calls are function calls:
+they either happen or throw, they are atomic within a transaction, and they are trivial to trace in a
+debugger.
+
+In microservices, complexity lives **in the operations**. Each service is individually comprehensible.
+But every call between them is a network call — it can time out, arrive twice, arrive late, or half
+succeed. Nothing spans two services atomically. Reproducing a bug means reproducing a distributed
+state.
+
+<Warning>
+  This is the trade that gets underestimated. Splitting a service does not remove complexity, it
+  converts compile-time problems into runtime problems. A wrong function signature is caught by the
+  compiler; a wrong assumption about another team's API is caught in production.
+</Warning>
+
+## Comparison
+
+<ComparisonTable
+  options={['Monolith', 'Microservices']}
+  aspectLabel="Aspect"
+  rows={[
+    {
+      aspect: 'Deployment',
+      values: [
+        'One artefact. Simple, and any change means shipping everything.',
+        'Independent per service. Flexible, and requires pipelines, versioning and compatibility discipline per service.',
+      ],
+    },
+    {
+      aspect: 'Calls between components',
+      values: [
+        'In-process function calls: fast, reliable, type-checked.',
+        'Network calls: latency, partial failure, retries, serialisation.',
+      ],
+    },
+    {
+      aspect: 'Data consistency',
+      values: [
+        'One database, real ACID transactions across the whole operation.',
+        'A database per service; cross-service consistency needs sagas and compensation.',
+      ],
+    },
+    {
+      aspect: 'Scaling',
+      values: [
+        'Scale the whole application, including parts that are idle.',
+        'Scale each service to its own load. Efficient, and more moving parts to size.',
+      ],
+    },
+    {
+      aspect: 'Fault isolation',
+      values: [
+        'A memory leak or crash can take the whole process down.',
+        'A failure is contained — provided callers have timeouts and fallbacks. Without them, failure cascades.',
+      ],
+    },
+    {
+      aspect: 'Technology choice',
+      values: [
+        'Effectively one stack.',
+        'Per-service choice — genuinely useful, and multiplies what the team must maintain.',
+      ],
+    },
+    {
+      aspect: 'Team autonomy',
+      values: [
+        'Shared codebase, so merge and release coordination grows with headcount.',
+        'Teams own services and release independently — the main reason large organisations adopt this.',
+      ],
+    },
+    {
+      aspect: 'Debugging',
+      values: [
+        'A stack trace and a debugger.',
+        'Distributed tracing, correlated logs across services, and reproducing timing.',
+      ],
+    },
+    {
+      aspect: 'Local development',
+      values: [
+        'Run one thing.',
+        'Run many things, or mock them and accept the drift from reality.',
+      ],
+    },
+    {
+      aspect: 'Refactoring boundaries',
+      values: [
+        'Move code between modules freely.',
+        'Changing a boundary means coordinated releases and data migration across services.',
+      ],
+    },
+  ]}
+/>
+
+## Where each genuinely wins
+
+### The monolith's strongest argument: transactions
+
+Some operations must be all-or-nothing. In a monolith that is one transaction:
+
+```typescript title="checkout-monolith.ts"
+/**
+ * Either every one of these happens, or none of them does. The database
+ * guarantees it; there is no failure mode where stock is reserved but no order
+ * exists.
+ */
+await db.transaction(async (tx) => {
+  const order = await tx.orders.insert({ customerId, totalCents });
+  await tx.inventory.decrement(items);
+  await tx.payments.insert({ orderId: order.id, amountCents: totalCents });
+  await tx.auditLog.insert({ action: 'order.created', orderId: order.id });
+});
+```
+
+Split those across four services and that guarantee disappears. There is no distributed transaction
+available in practice, so correctness must be reconstructed with a **saga**: a sequence of local
+transactions, each with a compensating action if a later step fails.
+
+```typescript title="checkout-saga.ts"
+/**
+ * The same operation across services. Note what has appeared: explicit
+ * compensation, ordering concerns, and a window during which the system is in a
+ * partially-committed state that must be tolerated by everything reading it.
+ */
+const order = await orderService.create({ customerId, totalCents });
+
+try {
+  await inventoryService.reserve(order.id, items);
+} catch (error) {
+  await orderService.cancel(order.id, 'inventory_unavailable');
+  throw error;
+}
+
+try {
+  await paymentService.charge(order.id, totalCents);
+} catch (error) {
+  // Compensation can itself fail, which is why these need to be retryable,
+  // idempotent, and monitored for stuck sagas.
+  await inventoryService.release(order.id);
+  await orderService.cancel(order.id, 'payment_failed');
+  throw error;
+}
+
+await orderService.confirm(order.id);
+```
+
+The second version is not merely longer. It admits states the first cannot reach — an order that
+exists with stock reserved and no payment — and every consumer of that data must now handle them.
+That is the cost of the split, and it is permanent.
+
+### The microservices' strongest argument: independent teams
+
+The clearest case for splitting has little to do with load. With enough engineers in one codebase, the
+bottleneck becomes coordination: shared release trains, one team's failing test blocking everyone's
+deploy, merge conflicts in shared modules, and a release process that requires agreement from people
+who have never met.
+
+Independent deployability solves an organisational problem, and it is the reason large companies adopt
+it. Which is why the honest test is not "how much traffic do we have?" but "how often is one team
+blocked by another team's release?" With three engineers, the answer is never, and microservices are
+pure overhead.
+
+## The modular monolith
+
+Framing this as binary hides the option most teams should take. A **modular monolith** deploys as one
+unit while maintaining strict internal boundaries.
+
+```text
+src/
+  modules/
+    orders/
+      index.ts          <- the module's only public surface
+      service.ts
+      repository.ts
+    inventory/
+      index.ts
+      service.ts
+    payments/
+      index.ts
+```
+
+The rules that make it work: modules communicate only through published interfaces, never by reaching
+into each other's internals or querying each other's tables; each module owns its own tables and no
+other module writes to them; and dependencies between modules are acyclic and enforced by tooling
+rather than convention.
+
+This gets most of what the boundaries are for — comprehensibility, ownership, testability — while
+keeping the deployment and transactional simplicity of a monolith. It also makes a future split
+straightforward, because the boundary already exists and the coupling has already been paid down.
+
+<Tip>
+  If the modular boundaries feel too restrictive to maintain in one codebase, they will not survive
+  being spread across services either. Failing to keep modules separate in a monolith is a strong
+  predictor of building a distributed system with the same tangle, plus network calls.
+</Tip>
+
+## Failure modes on each path
+
+<FailureScenarios
+  scenarios={[
+    {
+      failure: 'Distributed monolith',
+      impact:
+        'Services split by layer rather than domain, so every feature touches several and must be released together — all the operational cost, none of the independence',
+      mitigation:
+        'Split along business capabilities, and verify each service can be deployed alone before calling the split done.',
+    },
+    {
+      failure: 'Shared database between services',
+      impact:
+        "Services are coupled through the schema; one team's migration breaks another, and independent deployment is an illusion",
+      mitigation:
+        'Each service owns its tables exclusively. Cross-service reads go through an API or events.',
+    },
+    {
+      failure: 'Synchronous call chains',
+      impact:
+        'A request traverses five services in sequence; latency adds up and availability multiplies down — five 99.9% services in series give 99.5%',
+      mitigation:
+        'Prefer asynchronous events for non-critical paths, cache aggressively, and bound chain depth.',
+    },
+    {
+      failure: 'No timeouts on inter-service calls',
+      impact:
+        'One slow service exhausts thread pools in every caller, and an isolated problem becomes a total outage',
+      mitigation:
+        'Mandatory timeouts, circuit breakers, and bulkheads so one dependency cannot consume all capacity.',
+    },
+    {
+      failure: 'Monolith build and test time grows',
+      impact: 'Feedback slows until developers batch changes, which makes each release riskier',
+      mitigation:
+        'Parallelise tests, cache builds, and use module boundaries to test affected areas only.',
+    },
+    {
+      failure: 'Monolith resource contention',
+      impact:
+        'One endpoint leaking memory or saturating CPU degrades every other feature in the process',
+      mitigation:
+        'Separate process pools for heavy workloads and background jobs — a partial split that avoids the full cost.',
+    },
+    {
+      failure: 'Premature split',
+      impact:
+        'Boundaries drawn before the domain is understood; the wrong seams calcify and become expensive to move',
+      mitigation:
+        'Start modular in one deployable, and extract a service when a concrete, measured pressure justifies it.',
+    },
+  ]}
+/>
+
+## How to decide
+
+The question is not which architecture is better. It is which pressures you are actually under.
+
+**Start with a monolith — preferably a modular one — when** the team is small enough to coordinate
+directly, the domain is still being discovered, operations expertise is limited, or transactional
+consistency across the core workflow matters. This covers the large majority of new systems, and the
+cost of being wrong is low because a well-modularised monolith can be split later.
+
+**Split when you can point at a specific pressure**, such as: teams are repeatedly blocked by each
+other's releases; one component's scaling profile is genuinely different from the rest (video
+encoding, ML inference, a public webhook receiver) and scaling everything to suit it is wasteful; one
+component's failure must be isolated from the rest for regulatory or availability reasons; or a
+component genuinely needs a different technology.
+
+**Do not split because** the architecture is fashionable, a conference talk described it, the codebase
+feels large, or you anticipate scale you do not yet have. Note that the companies most associated with
+microservices — Amazon, Netflix, Uber — all extracted them from monoliths _under measured pressure_,
+years in. They did not start there.
+
+<KeyTakeaways
+  points={[
+    'The trade is code complexity for operational complexity, not simple for sophisticated.',
+    'Independent deployability is the real benefit, and it solves an organisational problem more than a technical one.',
+    'The biggest cost is losing transactions: cross-service consistency means sagas, compensation and partially-committed states.',
+    'A modular monolith captures most of the benefit of boundaries with none of the distribution cost.',
+    'A shared database between services means you have not actually split anything.',
+    'Extract services in response to a measured pressure, and split along business capabilities rather than technical layers.',
+  ]}
+/>
