@@ -44,8 +44,8 @@ each one renders a listing page inviting contributions.
 Requires **Node 22.12 or newer** (the version in [`.nvmrc`](.nvmrc)).
 
 ```bash
-git clone https://github.com/pelitech/pelitech-engineering-atlas.git
-cd pelitech-engineering-atlas
+git clone https://github.com/DarkeyPeleg/PeliTech-Engineering-Atlas.git
+cd PeliTech-Engineering-Atlas
 
 nvm use          # or install Node 22 another way
 npm install

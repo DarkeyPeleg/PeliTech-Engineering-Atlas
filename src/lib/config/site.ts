@@ -28,7 +28,7 @@ export const siteConfig = {
   description:
     'An open-source engineering knowledge base covering system design, software architecture, backend engineering, databases, APIs and third-party integrations — with diagrams, trade-offs, failure scenarios and practical implementation guidance.',
   url: resolveSiteUrl(),
-  repoUrl: 'https://github.com/pelitech/pelitech-engineering-atlas',
+  repoUrl: 'https://github.com/DarkeyPeleg/PeliTech-Engineering-Atlas',
   license: 'MIT',
   locale: 'en_US',
 } as const;

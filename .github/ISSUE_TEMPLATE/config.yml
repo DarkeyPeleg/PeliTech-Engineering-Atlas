@@ -1,8 +1,8 @@
 blank_issues_enabled: true
 contact_links:
   - name: Contributing guide
-    url: https://github.com/pelitech/pelitech-engineering-atlas/blob/main/CONTRIBUTING.md
+    url: https://github.com/DarkeyPeleg/PeliTech-Engineering-Atlas/blob/main/CONTRIBUTING.md
     about: Content standards, design-token rules, and how to write an article.
   - name: Ask a question
-    url: https://github.com/pelitech/pelitech-engineering-atlas/discussions
+    url: https://github.com/DarkeyPeleg/PeliTech-Engineering-Atlas/discussions
     about: Questions about a topic, or about where something belongs in the taxonomy.
